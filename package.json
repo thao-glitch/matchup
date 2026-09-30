@@ -1,0 +1,24 @@
+{
+  "name": "matchup",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Production-ready 1v1 global video chat (React + Vite + TS / Node + Socket.io / WebRTC)",
+  "scripts": {
+    "install:all": "npm --prefix client install && npm --prefix server install",
+    "dev": "node scripts/dev.js",
+    "dev:client": "npm --prefix client run dev",
+    "dev:server": "npm --prefix server run dev",
+    "build": "npm --prefix client run build",
+    "typecheck": "npm --prefix client run typecheck",
+    "start": "npm --prefix server start",
+    "test:signaling": "node scripts/test-signaling.js",
+    "test:db": "node scripts/test-db.js",
+    "test:auth": "node scripts/test-auth.js",
+    "test:turn": "node scripts/test-turn.js",
+    "test:e2e": "npm --prefix scripts install --no-audit --no-fund && node scripts/e2e.js",
+    "test:e2e:relay": "npm --prefix scripts install --no-audit --no-fund && E2E_RELAY=1 node scripts/e2e.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

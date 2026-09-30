@@ -1,0 +1,70 @@
+# Render blueprint — "Infrastructure as code" for the signaling server.
+# Create → New → Blueprint → point it at this repo; Render reads this file.
+services:
+  - type: web
+    name: matchup-signaling
+    runtime: node
+    plan: free # upgrade to starter/pro for production traffic
+    rootDir: server
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    autoDeploy: true
+
+    envVars:
+      # Public URL(s) of the deployed frontend (Vercel), comma separated.
+      # Socket.io only accepts CORS origins from this list.
+      - key: CORS_ORIGIN
+        sync: false # set after the Vercel deploy: https://your-app.vercel.app
+
+      # ── Database (MariaDB) — profiles, accounts, sessions, passports ──────
+      # Hosted MySQL also works (Aiven, PlanetScale…): set MARIADB_SSL=true
+      # and, if the provider needs it, MARIADB_SSL_CA=<path to CA bundle>.
+      # First one configured wins: MARIADB_* → MONGODB_URI → in-memory.
+      - key: MARIADB_HOST
+        sync: false # e.g. matchup-db.aivencloud.com
+      - key: MARIADB_PORT
+        value: "3306"
+      - key: MARIADB_USER
+        sync: false
+      - key: MARIADB_PASSWORD
+        sync: false # Render dashboard → "secret file" or plain env, never committed
+      - key: MARIADB_DATABASE
+        sync: false # e.g. defaultdb — auto-created if missing (safe name only)
+      - key: MARIADB_SSL
+        value: "true"
+      # Optional fallback: MongoDB Atlas (only used when MARIADB_* is unset).
+      - key: MONGODB_URI
+        sync: false
+
+      # ── WebRTC connectivity — TURN is required for symmetric NAT users ────
+      # Priority: Twilio → Cloudflare TURN → static secret → STUN-only.
+      # Preferred zero-ops: Cloudflare Realtime TURN (free tier) —
+      #   Realtime → TURN keys → create a key, paste both values below.
+      - key: CF_TURN_KEY_ID
+        sync: false
+      - key: CF_TURN_KEY_SECRET
+        sync: false
+      # Alternative A: coturn on your own VPS — TURN_URLS + TURN_SECRET.
+      - key: TURN_URLS
+        sync: false # turn:turn.example.com:3478?transport=udp,turns:…
+      - key: TURN_SECRET
+        sync: false # must equal coturn's static-auth-secret
+      # Alternative B: Twilio Network Traversal (SID + token).
+      - key: TWILIO_ACCOUNT_SID
+        sync: false
+      - key: TWILIO_AUTH_TOKEN
+        sync: false
+
+      - key: PRESENCE_INTERVAL_MS
+        value: "5000"
+
+# Notes:
+#  * Render injects PORT automatically — do not hard-code it.
+#  * WebSockets work out of the box on Render (no sticky-session config needed
+#    for a single instance). See README → "Scaling" before adding instances.
+#  * The service also serves client/dist when present, so you can preview the
+#    whole app from the Render URL during development.
+#  * Render is the GIT-based alternative (needs GitHub; free plan sleeps after
+#    inactivity). The no-GitHub, stays-awake path — podman image → Koyeb +
+#    Aiven MySQL — is documented step by step in DEPLOY.md.

@@ -1,0 +1,8 @@
+# Never bake secrets or host-specific state into the image.
+.env
+.env.*
+node_modules
+*.log
+Dockerfile
+.dockerignore
+render.yaml

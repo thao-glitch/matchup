@@ -1,0 +1,22 @@
+node_modules/
+dist/
+dist-ssr/
+*.local
+.env
+.env.*
+!.env.example
+!.env.example.local
+
+.DS_Store
+*.log
+npm-debug.log*
+
+.vite/
+.vercel
+.railway
+.tunnel-url
+.sync.lock
+.sync.log
+
+# Local deployment credentials (never commit)
+.deploy.env

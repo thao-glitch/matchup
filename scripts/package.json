@@ -1,0 +1,9 @@
+{
+  "name": "matchup-tests",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Optional dev-only test harness (browser E2E). test-signaling.js needs no extra deps.",
+  "devDependencies": {
+    "puppeteer-core": "^25.12.0"
+  }
+}
