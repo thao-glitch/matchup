@@ -522,6 +522,15 @@ async function main() {
     await pageC.reload({ waitUntil: 'load', timeout: 20000 });
     await pageC.waitForSelector('#username', { timeout: 10000 });
     const stillSignedIn = await waitForText(pageC, 'Signed in as', 20000);
+    // The silent sign-in renders first, then the profile lands asynchronously —
+    // over a remote DB that gap is real, so wait for the value itself.
+    try {
+      await pageC.waitForFunction(
+        (name) => document.querySelector('#username')?.value === name,
+        { timeout: 15000 },
+        accName,
+      );
+    } catch { /* reported by the assert below */ }
     const prefill = await pageC.evaluate(() => ({
       username: document.querySelector('#username')?.value,
       age: document.querySelector('#age')?.value,
