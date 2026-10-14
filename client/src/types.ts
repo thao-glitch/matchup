@@ -28,9 +28,38 @@ export interface Profile {
 
 /** The server-side account: what `/api/auth/*` returns once you are signed in. */
 export interface AccountUser {
+  /** Internal row id — also the `{id}` in a paybill Account Number. */
+  id?: number;
   username: string;
   profile: Profile;
   createdAt?: string | null;
+  /** Paybill entitlement: ISO timestamp of when premium runs out, or null. */
+  premiumUntil?: string | null;
+}
+
+/**
+ * One row of the paybill ledger, as the signed-in user sees it
+ * (`/api/payments/*`). `accountNo` is what they type as the Account Number at
+ * the paybill — the single value that ties an incoming bank payment to them.
+ */
+export interface PaymentIntent {
+  id: number;
+  /** `pending` → waiting for the owner to check the bank statement. */
+  status: 'pending' | 'approved' | 'rejected';
+  bank: string;
+  paybill: string;
+  accountNo: string;
+  amount: number;
+  currency: string;
+  productName: string;
+  premiumDays: number | null;
+  /** The M-PESA / bank transaction code the payer copied in (optional). */
+  providerRef: string | null;
+  note: string | null;
+  instructions: string;
+  supportContact: string;
+  createdAt: string | null;
+  reviewedAt: string | null;
 }
 
 /** The subset of a profile that is ever shared with the other side of a match. */

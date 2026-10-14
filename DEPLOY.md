@@ -1,123 +1,137 @@
-# Running Matchup independently (no PC required)
+# Running Matchup standalone (one container, one URL, no PC required)
 
-The app is three pieces — client, signaling server, database. This guide moves
-all of it into the cloud on **free tiers only: no credit card, no GitHub**.
-After this, your computer can be off and the site keeps working.
+Matchup ships as **a single container**: the React app, the API, the WebSocket
+signaling server and the `/admin` dashboard all come out of one `node server.js`
+process. There is no separate frontend host, nothing to keep in sync and no CORS
+to configure — the browser talks to one origin for everything.
 
 | Piece | Where | Cost |
 | --- | --- | --- |
-| Client (React) | Vercel (already live: https://matchup-mu.vercel.app) | free |
-| Signaling server (Node/Socket.io) | **Koyeb** — free web service, container image | free |
-| Database (accounts + profiles) | **Aiven for MySQL** — free tier, no card | free |
+| **App + API + admin** (this repo, one image) | **Koyeb** — free web service | free |
+| Database (accounts, passports, payments, settings) | **Aiven for MySQL** — free tier, no card | free |
+| Image registry | **Docker Hub** — free | free |
 | TURN relay (strict-NAT fallback) | **Cloudflare Realtime TURN** — free tier | free |
 
-> Alternatives are at the end: Render (needs GitHub) and a paid VPS (full
-> control, runs server + DB + coturn in one place, ~$5/mo).
+> Media itself is **peer-to-peer over WebRTC** — video never touches your
+> server. The container only introduces people and relays a few KB of SDP/ICE.
+
+---
+
+## 0. One-time: what you need
+
+- A **Docker Hub** account (email, no card): https://hub.docker.com
+- A **Koyeb** account (any sign-in, no card): https://app.koyeb.com
+- An **Aiven** account (email or Google, no card): https://aiven.io
+
+Fill these into `.deploy.env` in the repo root (it stays on your machine and is
+never committed — it is in `.gitignore` and `.dockerignore`):
+
+```bash
+DOCKERHUB_USER=mauru2df
+DOCKERHUB_TOKEN=dckr_pat_xxxxxxxx        # hub.docker.com → settings → security → new token
+DOCKERHUB_REPO=mauru2df/matchup
+KOYEB_TOKEN=                              # app.koyeb.com → account → API tokens
+
+MARIADB_HOST=…        # Aiven → your service → connection information
+MARIADB_PORT=…
+MARIADB_USER=avnadmin
+MARIADB_PASSWORD=…
+MARIADB_DATABASE=defaultdb
+MARIADB_SSL=true
+
+ADMIN_USERNAME=owner                      # first /admin login (used once, at first boot)
+ADMIN_PASSWORD=choose-a-long-secret-here  # 10+ characters
+```
 
 ---
 
 ## 1. Database — Aiven free MySQL (5 min)
 
 1. Sign up at **https://aiven.io** (email or Google — *no credit card*).
-2. **Create service → MySQL → Plan: Free → Create.** (The free tier picks the
-   cloud/region for you; pick any project name.) Wait ~2 minutes.
-3. Open the service → **Overview → Connection information** and copy:
-   - **Host** (e.g. `mysql-xxxx.f.aivencloud.com`)
-   - **Port** (a number like `12691`)
-   - **User**: `avnadmin`
-   - **Password**: click to reveal (or regenerate) — this is your
-     `MARIADB_PASSWORD`.
-4. The server creates its own database and tables on first boot
-   (`MARIADB_DATABASE=matchup`), so there is nothing else to set up.
+2. **Create service → MySQL → Plan: Free → Create.** Wait ~2 minutes.
+3. Open the service → **Overview → Connection information** and copy the host,
+   port, password and database name (`defaultdb`) into `.deploy.env`.
+4. Nothing else: the app creates its own tables at boot, and creates the
+   database itself if it is missing.
 
-## 2. Push the server as a container image (5 min)
-
-The server ships as a Docker/OCI image (`server/Dockerfile`). You need a free
-Docker Hub account to host the built image: **https://hub.docker.com** → sign
-up (email, no card). On this PC `podman` stands in for `docker` — the commands
-are identical.
+## 2. Build + push + deploy (one command)
 
 ```bash
 cd ~/Desktop/matchup
-podman build --format docker -t matchup-server ./server     # ~1 min first time
-podman login docker.io                                       # your Docker Hub login
-podman tag  matchup-server docker.io/YOURHUBUSER/matchup-server:latest
-podman push docker.io/YOURHUBUSER/matchup-server:latest      # ~30 s
+./scripts/deploy.sh
 ```
 
-> Every future deploy is those same four lines (build → tag → push), then
-> restart the service on Koyeb.
+That builds the standalone image (client bundle compiled inside the image, then
+copied next to the server), tags it `docker.io/YOURUSER/matchup:latest`, pushes
+it, and — if `KOYEB_TOKEN` is set — asks Koyeb to pick up the new image.
 
-## 3. Server — Koyeb free web service (10 min)
+> Every future deploy is the same one command. Locally the CLI is `docker`;
+> the build takes ~1 minute warm, ~2 cold.
 
-1. Sign up at **https://app.koyeb.com** (any sign-in method — no card).
-2. **Create App → Web Service → Container image** and enter
-   `docker.io/YOURHUBUSER/matchup-server:latest`.
-3. Pick a **free** region (Frankfurt or Washington, D.C.).
-4. Add the environment variables:
+## 3. Koyeb — create the service (10 min, once)
+
+1. **Create App → Web Service → Container image** → `docker.io/YOURUSER/matchup:latest`.
+2. Pick a **free** region (Frankfurt or Washington, D.C.).
+3. Add the environment variables:
 
    | Key | Value |
    | --- | --- |
-   | `CORS_ORIGIN` | `https://matchup-mu.vercel.app` |
-   | `MARIADB_HOST` | from Aiven |
-   | `MARIADB_PORT` | from Aiven |
-   | `MARIADB_USER` | `avnadmin` |
-   | `MARIADB_PASSWORD` | from Aiven |
-   | `MARIADB_DATABASE` | `matchup` |
-   | `MARIADB_SSL` | `true` |
-   | `CF_TURN_KEY_ID` | *(optional — step 4)* |
-   | `CF_TURN_KEY_SECRET` | *(optional — step 4)* |
+   | `MARIADB_HOST` / `MARIADB_PORT` / `MARIADB_USER` / `MARIADB_PASSWORD` / `MARIADB_DATABASE` / `MARIADB_SSL` | from `.deploy.env` (Aiven) |
+   | `ADMIN_USERNAME` | your dashboard username |
+   | `ADMIN_PASSWORD` | your dashboard password (10+ chars) |
+   | `CORS_ORIGIN` | *optional* — only needed if you later serve the client from a second origin |
+   | `CF_TURN_KEY_ID` / `CF_TURN_KEY_SECRET` | *optional* — step 4 |
 
-5. Set the health check to **HTTP, path `/health`** and deploy. The service
-   listens on the port Koyeb injects in `PORT` (the server reads it
-   automatically) and binds `0.0.0.0` by default.
-6. When the status is green, open `https://<app>-<id>.koyeb.app/health` — you
-   want:
+4. Health check: **HTTP, path `/health`**. Deploy.
 
-   ```json
-   {"status":"ok", ..., "store":"maria", "accounts":"maria"}
-   ```
+**Verify:**
 
-   `store:maria` proves the Aiven database is live and the schema was created
-   automatically.
+```bash
+curl -s https://<app>-<id>.koyeb.app/health
+# {"status":"ok","store":"maria","accounts":"maria", …}
+```
 
-## 4. TURN relay — Cloudflare free tier (10 min)
+`store:maria` proves the database is live and the schema was created for you.
 
-Without TURN, ~10% of users (symmetric NAT, CGNAT, strict Wi-Fi) hit
-"Unable to connect". Cloudflare issues short-lived relay credentials with no
-infrastructure of your own — no router config, no port-forward, no PC:
+## 4. TURN relay — Cloudflare free tier (10 min, optional but recommended)
 
-1. Sign up at **https://dash.cloudflare.com** (free plan, no card).
-2. Left menu → **Realtime → TURN** → **Create TURN key**.
-3. Copy the **key ID** and the **key secret** (the secret is shown once).
-4. Set them on Koyeb as `CF_TURN_KEY_ID` / `CF_TURN_KEY_SECRET`, redeploy.
-5. Verify: `https://<app>.koyeb.app/api/ice` must report
+Without TURN, roughly one user in ten (symmetric NAT, CGNAT, strict corporate
+Wi-Fi) hits "Unable to connect". Cloudflare issues short-lived relay credentials
+with no infrastructure of your own:
+
+1. **dash.cloudflare.com → Realtime → TURN → Create TURN key.**
+2. Copy the key id + secret into Koyeb, redeploy.
+3. Confirm: `curl -s https://<app>.koyeb.app/api/ice` reports
    `"source":"cloudflare"` and `"turnConfigured":true`.
 
-*Leave these unset and the app still works — STUN-only — for ~90% of users.*
+*Leave it unset and the app still works STUN-only for ~90% of users.*
 
-## 5. Point the client at the new server (2 min)
+## 5. First admin login (2 min)
 
-```bash
-cd ~/Desktop/matchup/client
-npx vercel env rm VITE_SIGNALING_URL production --yes
-echo "https://<app>-<id>.koyeb.app" | npx vercel env add VITE_SIGNALING_URL production
-npx vercel --prod
-```
+Open `https://<app>-<id>.koyeb.app/admin` and sign in with `ADMIN_USERNAME` /
+`ADMIN_PASSWORD` from `.deploy.env`. From then on the dashboard owns its own
+credentials — change the password in **Settings**, not in the environment.
 
-Or in the Vercel dashboard: Project → Settings → Environment Variables →
-`VITE_SIGNALING_URL` → new value → redeploy.
+The dashboard gives you: live users and queue, the call telemetry, the paybill
+ledger, feature switches (ads / sign-ups / payments / maintenance), ban &
+premium controls, and the audit trail of everything you did.
 
-**Verify everything end-to-end:**
+> If you never set `ADMIN_*`, no admin exists and `/admin` will only ever show
+> the login form. Set the two variables and restart the service to create one
+> (it only ever bootstraps while the admin table is empty).
 
-```bash
-APP_URL=https://matchup-mu.vercel.app API_URL=https://<app>-<id>.koyeb.app \
-  node scripts/e2e.js          # expect 37/37, "account created from the lobby"
-```
+## 6. Payments (paybill)
 
-## 6. Move existing accounts over (optional, 3 min)
+The lobby ships with a paybill panel driven entirely by
+**`/admin` → Settings** (bank, paybill number, account-number format, price,
+premium length, wording). Nothing is hard-coded and nothing needs a redeploy.
 
-The PC's MariaDB may already hold accounts people created. Bring them along:
+Full walkthrough — including exactly what to ask Diamond Trust Bank for —
+in [docs/PAYMENTS.md](docs/PAYMENTS.md).
+
+## 7. Move existing accounts over (optional, 3 min)
+
+If this PC's MariaDB already holds accounts people created, bring them along:
 
 ```bash
 mariadb-dump --no-tablespaces --single-transaction matchup > matchup-dump.sql
@@ -126,43 +140,40 @@ mariadb --host AIVEN_HOST --port AIVEN_PORT --user avnadmin \
         --password 'AVN_PASSWORD' matchup < matchup-dump.sql
 ```
 
-(If the client refuses the connection, add `--ssl`. Skip it entirely if you'd
-rather start fresh — the server re-creates the schema itself.)
+(Add `--ssl` if the client refuses the connection. Skip it entirely to start
+fresh — the schema re-creates itself.)
 
-## 7. Retire the PC stack (when you're ready)
+## 8. Retire the PC stack (when you're ready)
 
-Once steps 1–5 verify green, the site no longer needs this computer:
-
-```bash
-systemctl --user disable --now matchup-tunnel matchup matchup-turn
-```
-
-Keep MariaDB installed locally if you want the old stack for development —
+Once the health check and a real call verify green, the site no longer needs
+this computer. Keep the local MariaDB for development —
 `scripts/local.sh start` brings the whole thing back any time.
 
 ---
 
-## What each piece costs at scale
+## What it costs at scale
 
 | Traffic | Setup | Monthly |
 | --- | --- | --- |
-| Free tiers (above) | — | **$0** (Koyeb free instance + Aiven free + Cloudflare free TURN) |
-| Growth | **One VPS** (Hetzner/Contabo ~$5) runs server + MariaDB + coturn with `docker compose`, Caddy handles HTTPS | ~$5 |
+| Free tiers (above) | Koyeb free instance + Aiven free + Cloudflare free TURN | **$0** |
+| Growth | **One VPS** (Hetzner/Contabo ~$5) runs the container + MariaDB + coturn, Caddy handles HTTPS | ~$5 |
 | Real scale | Koyeb/Render paid instance + Aiven paid DB | $10–30 |
 
-### Alternative: Render (needs a GitHub repo)
+### Alternatives
 
-`server/render.yaml` is a ready blueprint (web service, `npm install` /
-`npm start`, health check `/health`). GitHub-connect the repo → New →
-Blueprint. Set the same env vars as step 3. Caveat: Render's free instance
-**sleeps after ~15 min of no traffic** (first visitor waits ~50 s; clients
-reconnect automatically) — Koyeb's free instance is the smoother path.
+- **Render** — `server/render.yaml` is a ready blueprint for the API-only
+  mode. Its free instance sleeps after ~15 min idle; Koyeb is smoother.
+- **Any VPS with Docker** — `docker build -t matchup . && docker run -p 4000:4000
+  --env-file prod.env matchup` behind a Caddy/nginx TLS proxy. Everything in
+  one place, full control.
 
 ### The invariants
 
 - The server reads **all** configuration from environment variables — there is
   no `.env` in the image and no secret in the client bundle.
-- Schema is created idempotently at boot; a missing database is created too.
-- `GET /health` reports `store`/`accounts` so you can see which backend is live.
-- Local development is unchanged: `scripts/local.sh start` runs everything on
-  this PC with the local MariaDB.
+- Schema (accounts, passports, admins, payments, settings, audit) is created
+  idempotently at boot; a missing database is created too.
+- `GET /health` reports `store` / `accounts` so you can see which backend is
+  live; `GET /api/config` reports the switches the dashboard controls.
+- Local development is unchanged: `npm run dev` runs client + server on this
+  PC against the local MariaDB.

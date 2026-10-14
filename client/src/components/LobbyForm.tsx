@@ -18,6 +18,8 @@ import {
 } from '../lib/auth';
 import { AlertIcon, GlobeIcon, SpinnerIcon } from './icons';
 import AdSlot from './AdSlot';
+import PaymentPanel from './PaymentPanel';
+import type { PublicConfig } from '../lib/config';
 
 interface Props {
   onStart: (profile: Profile) => void;
@@ -35,6 +37,12 @@ interface Props {
   onOpenPassport: () => void;
   busy: boolean;
   error: AppError | null;
+  /**
+   * Server-side switches (ads / sign-ups / payments) the owner flips from
+   * `/admin`. Fetching it is the caller's job — a missing config must simply
+   * mean "everything on", which is what the defaults in `lib/config.ts` say.
+   */
+  config: PublicConfig;
 }
 
 const AGES = Array.from({ length: 82 }, (_, i) => 18 + i); // 18 … 99
@@ -64,6 +72,7 @@ export default function LobbyForm({
   onOpenPassport,
   busy,
   error,
+  config,
 }: Props) {
   const countries = useMemo(() => countryOptions(), []);
 
@@ -464,7 +473,7 @@ export default function LobbyForm({
               )}
             </button>
           </div>
-        ) : (
+        ) : config.features.signup ? (
           <div className="mt-6 rounded-xl border border-white/10 bg-surface-3/60 p-4 text-left">
             <label className="label" htmlFor="password">
               Keep this profile
@@ -517,6 +526,15 @@ export default function LobbyForm({
               Both use the username above — pick one, pick a password, done.
             </p>
           </div>
+        ) : (
+          /* Sign-ups switched off from the dashboard (a burst of spam, a
+             database migration): matching still works, only accounts pause. */
+          <div className="mt-6 rounded-xl border border-white/10 bg-surface-3/60 p-4 text-left">
+            <p className="text-xs leading-relaxed text-muted">
+              New accounts are paused for a short while. You can still match as a guest —
+              your passport stamps stay saved on this device until accounts are back.
+            </p>
+          </div>
         )}
 
         {authError && (
@@ -529,6 +547,10 @@ export default function LobbyForm({
             {flash}
           </p>
         )}
+
+        {/* Paybill panel: the reference + status, nothing more. Renders
+            nothing at all while payments are switched off in /admin. */}
+        <PaymentPanel account={account} config={config} />
 
         <p className="mt-4 text-center text-xs leading-relaxed text-muted">
           Camera & microphone access is requested next. Only people you are matched with
@@ -563,8 +585,10 @@ export default function LobbyForm({
       </form>
 
       {/* Renders nothing unless the build carries VITE_ADSENSE_* — localhost,
-          the tests and pre-approval deployments stay completely ad-free. */}
-      <AdSlot className="mt-5" />
+          the tests and pre-approval deployments stay completely ad-free.
+          `features.ads` is the owner's kill switch in /admin, so a premium
+          audience or a policy problem can be handled without a redeploy. */}
+      {config.features.ads && <AdSlot className="mt-5" />}
 
       <p className="mt-4 text-center text-xs text-muted">
         <a

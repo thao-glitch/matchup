@@ -16,7 +16,7 @@ server**; the server only introduces people and relays a few kilobytes of SDP/IC
 | Signaling  | Node.js + Express 5 + Socket.io                                |
 | Database   | MariaDB → MongoDB → in-memory (first one configured wins)      |
 | NAT punch  | STUN + TURN (coturn / Twilio / Cloudflare — any one works)     |
-| Deployment | Vercel (frontend) + Koyeb/Render/VPS (backend) — [DEPLOY.md](DEPLOY.md) |
+| Deployment | **One container** — app + API + admin on Koyeb/Render/VPS ([DEPLOY.md](DEPLOY.md)) |
 
 **Verified end-to-end**: 43/43 browser E2E checks (match → ICE → both-way video →
 mute/camera → chat → Spark → rock-paper-scissors duel → hang-up → *Next* →
@@ -151,6 +151,7 @@ Open **two tabs** on `http://localhost:5173`, fill in two complementary profiles
 | `TWILIO_ACCOUNT_SID` | alt      | Twilio Network Traversal (short-lived TURN credentials)            |
 | `TWILIO_AUTH_TOKEN`  | alt      | ↑                                                                |
 | `PRESENCE_INTERVAL_MS` | no     | Live counter push interval (default `5000`)                        |
+| `ADMIN_USERNAME` / `ADMIN_PASSWORD` | no | Creates the first `/admin` dashboard login on the very first boot (10+ chars). Ignored afterwards — the dashboard owns its credentials |
 
 ### `client/.env.local`
 
@@ -373,14 +374,41 @@ fixed emoji set), spoofed-room drops, and its own 15/s rate limit so the fun
 channel can never crowd out the SDP relay. No server game state: everything
 shared is derivable from the same events both sides already see.
 
+### 4.8 Admin dashboard & paybill payments
+
+Two features that live entirely behind the same process — no extra service:
+
+**`/admin`** — a login-protected dashboard (`server/src/admin.js` +
+`client/src/admin/`): live users and queue, call telemetry, the paybill ledger,
+feature switches (ads / sign-ups / payments / **maintenance**), ban & premium
+controls and an audit trail of every action. Admins live in their own `admins`
+table with their own scrypt hashes and 12-hour sessions — being a user of the
+app can never make you an admin of it.
+
+**Paybill payments** (`server/src/payments.js` + `client/src/lib/payments.ts`)
+— a visitor signs in, the lobby shows *their* unique Account Number (`MU1042`)
+plus the paybill number and price you configured, they pay from any bank app or
+M-PESA, press **I have paid**, and you approve the row in `/admin` → Payments.
+Approval stamps premium on the account. Everything (bank, paybill, price,
+premium length, wording) is edited in `/admin` → Settings and applies live.
+Full guide, including what to ask the bank for: [docs/PAYMENTS.md](docs/PAYMENTS.md).
+
+Matchmaking enforces all of it: a banned account cannot log in *or* queue
+(username and IP), a `features.maintenance` flip pauses the queue instantly,
+and `GET /api/config` hands the switches to the lobby.
+
 ---
 
 ## 5. Deployment
 
-> **Run it fully independently → [DEPLOY.md](DEPLOY.md)** — free Koyeb (server
-> container), free Aiven MySQL, free Cloudflare TURN, Vercel client. No credit
-> card, no GitHub, and your PC can be switched off. The sections below cover
-> the classic paths (Render blueprint, single service, TURN, local MariaDB).
+> **Run it fully independently → [DEPLOY.md](DEPLOY.md)** — one container (app +
+> API + WebSocket + `/admin`) on free Koyeb, free Aiven MySQL, free Cloudflare
+> TURN. No credit card, no GitHub, no separate frontend host, and your PC can
+> be switched off. The sections below cover the classic paths (Render
+> blueprint, TURN, local MariaDB).
+>
+> **Payments → [docs/PAYMENTS.md](docs/PAYMENTS.md)** — accepting money through
+> your DTB paybill, and what to ask the bank for.
 >
 > **Ads & promotion → [ADS.md](ADS.md)** — AdSense/ad-network setup in the app
 > plus the paid-campaign playbook.
@@ -438,12 +466,23 @@ the deploy that should use it. Then copy the printed
 restart the server — with `CORS_ORIGIN=*` the app still works, but pinning the
 exact origin is what you want in production.
 
-### 5.3 Single-service alternative
+### 5.3 Standalone (single container, single URL) — the default
 
-If you'd rather run one service: build the client (`cd client && npm run build`)
-before the server starts. The server auto-detects `client/dist` and serves the SPA
-from the same origin (no CORS, no separate frontend hosting). Point Render's build
-command at `cd ../client && npm install && npm run build` with root dir `server`.
+The root `Dockerfile` builds the client **inside** the image and copies the
+bundle next to the server, so one process serves the app, the API, the
+WebSocket and `/admin` from one origin:
+
+```bash
+docker build -t matchup .          # ~1 min warm, ~2 cold
+docker run -p 4000:4000 --env-file prod.env matchup
+open http://localhost:4000        # the whole app
+```
+
+`VITE_SIGNALING_URL` is left empty on purpose: the bundle calls `/api`,
+`/api/ice` and `/socket.io` on its own origin. Deploy the same image with
+`./scripts/deploy.sh` — [DEPLOY.md](DEPLOY.md) walks through Koyeb end to end.
+If you'd rather build the client on the host (`cd client && npm run build`),
+the server still auto-detects `client/dist` and serves the SPA exactly as before.
 
 ### 5.4 Deploying TURN
 

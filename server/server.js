@@ -15,6 +15,9 @@ const telemetry = require('./src/telemetry');
 const store = require('./src/store');
 const accounts = require('./src/accounts');
 const passport = require('./src/passport');
+const settings = require('./src/settings');
+const admin = require('./src/admin');
+const payments = require('./src/payments');
 
 const PORT = Number(process.env.PORT) || 4000;
 const HOST = process.env.HOST || '0.0.0.0';
@@ -75,6 +78,11 @@ app.get('/health', (req, res) => {
     store: typeof store.getMode === 'function' ? store.getMode() : 'memory',
     // Where accounts live: `maria` = the database on this PC, `memory` = dev.
     accounts: accounts.backend(),
+    // Dashboard + ledger: `maria` = live, `memory` = no database to hold them.
+    admin: admin.backend(),
+    payments: payments.backend(),
+    // Which switch positions the lobby is currently rendering.
+    features: settings.get().features,
     // Operational glance: `turnConfigured: false` means strict-NAT users fail.
     ice: describeIce(),
   });
@@ -107,6 +115,16 @@ app.get('/api/stats', async (req, res) => {
   // `calls` answers "is TURN earning its keep?" — success rate, relay share,
   // and how much traffic is still running without a relay fallback.
   res.json({ ...db, matchmaking, ice: describeIce(), calls: telemetry.snapshot() });
+});
+
+/**
+ * GET /api/config → what the lobby needs to render itself: feature switches
+ * plus the paybill block (bank, number, price, wording). Public on purpose —
+ * it is the same information the payment screen shows to everyone — and it
+ * never leaves this process (read from the settings cache, no DB round-trip).
+ */
+app.get('/api/config', (req, res) => {
+  res.set('Cache-Control', 'no-cache').json(settings.publicConfig());
 });
 
 // ── Accounts (username + password) ──────────────────────────────────────────
@@ -183,7 +201,7 @@ function sendAuthError(res, err) {
 app.post('/api/auth/register', credentialLimiter, async (req, res) => {
   try {
     const { username, password, profile } = req.body || {};
-    res.status(201).json(await accounts.register({ username, password, profile }));
+    res.status(201).json(await accounts.register({ username, password, profile, ip: req.ip }));
   } catch (err) {
     sendAuthError(res, err);
   }
@@ -193,7 +211,7 @@ app.post('/api/auth/register', credentialLimiter, async (req, res) => {
 app.post('/api/auth/login', credentialLimiter, async (req, res) => {
   try {
     const { username, password } = req.body || {};
-    res.json(await accounts.login({ username, password }));
+    res.json(await accounts.login({ username, password, ip: req.ip }));
   } catch (err) {
     sendAuthError(res, err);
   }
@@ -259,6 +277,145 @@ app.post('/api/passport/sync', sessionLimiter, async (req, res) => {
   }
 });
 
+// ── Paybill payments ─────────────────────────────────────────────────────────
+
+/** Creating an intent is rare (once per person); 30/min/IP is already generous. */
+const paymentLimiter = rateLimit({ windowMs: 60_000, max: 30 });
+
+/** POST /api/payments/intent (Bearer) { providerRef? } → 201 { payment } */
+app.post('/api/payments/intent', paymentLimiter, async (req, res) => {
+  try {
+    const user = await accounts.authenticate(bearerOf(req));
+    if (!user) {
+      return res
+        .status(401)
+        .json({ error: { code: 'unauthorized', message: 'Please sign in to get a reference.' } });
+    }
+    res.status(201).json({ payment: await payments.createIntent(user, req.body || {}) });
+  } catch (err) {
+    sendAuthError(res, err);
+  }
+});
+
+/** GET /api/payments/mine (Bearer) → { payments, premiumUntil } — own rows only. */
+app.get('/api/payments/mine', sessionLimiter, async (req, res) => {
+  try {
+    const user = await accounts.authenticate(bearerOf(req));
+    res.set('Cache-Control', 'no-store').json(await payments.mine(user));
+  } catch (err) {
+    sendAuthError(res, err);
+  }
+});
+
+// ── Admin dashboard ──────────────────────────────────────────────────────────
+
+/**
+ * The dashboard gets its own, much tighter login budget: 10 attempts/min/IP is
+ * plenty for a human and hopeless for a password guesser. Sessions and reads
+ * share a generous bucket (the users table pages over the same endpoint).
+ */
+const adminLoginLimiter = rateLimit({ windowMs: 60_000, max: 10 });
+const adminLimiter = rateLimit({ windowMs: 60_000, max: 300 });
+
+/**
+ * Wrap a dashboard handler with authentication: every route below runs only
+ * with a valid admin session, and every failure (auth or thrown error) leaves
+ * through the same `{ error: { code, message } }` envelope as the user API.
+ */
+function adminRoute(handler) {
+  return async (req, res) => {
+    try {
+      const identity = await admin.authenticate(bearerOf(req));
+      if (!identity) {
+        return res
+          .status(401)
+          .json({ error: { code: 'unauthorized', message: 'Sign in to the dashboard.' } });
+      }
+      // A handler may either answer itself (`res.json(...)` → returns the
+      // response) or hand back a plain payload, which is sent as JSON here.
+      const out = await handler(identity, req, res);
+      if (out === undefined || out === res || res.writableEnded) return undefined;
+      return res.json(out);
+    } catch (err) {
+      return sendAuthError(res, err);
+    }
+  };
+}
+
+/** POST /api/admin/login { username, password } → { token, admin } */
+app.post('/api/admin/login', adminLoginLimiter, async (req, res) => {
+  try {
+    const { username, password } = req.body || {};
+    res.json(await admin.login({ username, password }));
+  } catch (err) {
+    sendAuthError(res, err);
+  }
+});
+
+/** POST /api/admin/logout (Bearer) → 204. Always succeeds. */
+app.post('/api/admin/logout', adminLimiter, async (req, res) => {
+  await admin.logout(bearerOf(req));
+  res.status(204).end();
+});
+
+/** GET /api/admin/me (Bearer) → { admin } — the dashboard's silent re-login. */
+app.get('/api/admin/me', adminLimiter, adminRoute(async (identity) => ({ admin: identity })));
+
+/** GET /api/admin/overview → accounts, live queue, calls, ledger, settings. */
+app.get('/api/admin/overview', adminLimiter, adminRoute(async (identity, req, res) => {
+  res.set('Cache-Control', 'no-store');
+  return res.json(await admin.overview(matchmaker));
+}));
+
+/** GET /api/admin/users?q=&filter=&page=&size= → { items, total, page, size } */
+app.get('/api/admin/users', adminLimiter, adminRoute(async (identity, req, res) => {
+  const { q, filter, page, size } = req.query || {};
+  res.set('Cache-Control', 'no-store');
+  const result = await admin.listUsers({ q, filter, page: Number(page), size: Number(size) });
+  res.json({ ...result, page: Math.max(1, Number(page) || 1), size: Math.min(100, Number(size) || 25) });
+}));
+
+/** PATCH /api/admin/users/:id { banned?, premiumDays? } → { user } */
+app.patch('/api/admin/users/:id', adminLimiter, adminRoute(async (identity, req, res) => {
+  const user = await admin.updateUser(identity, Number(req.params.id), req.body || {});
+  res.json({ user });
+}));
+
+/** DELETE /api/admin/users/:id → 204 (sessions + passport cascade away). */
+app.delete('/api/admin/users/:id', adminLimiter, adminRoute(async (identity, req, res) => {
+  await admin.deleteUser(identity, Number(req.params.id));
+  res.status(204).end();
+}));
+
+/** GET /api/admin/payments?status=&page=&size= → { items, total, page, size } */
+app.get('/api/admin/payments', adminLimiter, adminRoute(async (identity, req, res) => {
+  const { status, page, size } = req.query || {};
+  res.set('Cache-Control', 'no-store');
+  const result = await admin.listPayments({ status, page: Number(page), size: Number(size) });
+  res.json({ ...result, page: Math.max(1, Number(page) || 1), size: Math.min(100, Number(size) || 25) });
+}));
+
+/** PATCH /api/admin/payments/:id { status, note? } → { payment } — approval grants premium. */
+app.patch('/api/admin/payments/:id', adminLimiter, adminRoute(async (identity, req, res) => {
+  const payment = await admin.reviewPayment(identity, Number(req.params.id), req.body || {});
+  res.json({ payment });
+}));
+
+/** GET /api/admin/settings → the full payment + feature configuration. */
+app.get('/api/admin/settings', adminLimiter, adminRoute(async () => ({
+  settings: await admin.getSettings(),
+})));
+
+/** PUT /api/admin/settings { payment?, features? } → { settings } (validated). */
+app.put('/api/admin/settings', adminLimiter, adminRoute(async (identity, req, res) => {
+  res.json({ settings: await admin.saveSettings(identity, req.body || {}) });
+}));
+
+/** GET /api/admin/audit?limit= → newest dashboard actions first. */
+app.get('/api/admin/audit', adminLimiter, adminRoute(async (identity, req, res) => {
+  res.json({ items: await admin.listAudit(Number((req.query || {}).limit) || 100) });
+}));
+
 // ── Optional: host the SPA from this process ─────────────────────────────────
 if (servesClient) {
   console.info(`[http] serving client bundle from ${CLIENT_DIST}`);
@@ -289,9 +446,18 @@ io.on('connection', (socket) => {
 
 async function main() {
   await store.initStore();
+  const mode = store.getMode();
   // Accounts follow the store: MariaDB when it is up, in-memory otherwise.
-  accounts.init(store.getMode());
-  passport.init(store.getMode());
+  accounts.init(mode);
+  passport.init(mode);
+  // Payments, settings and the dashboard all need a real database — they
+  // degrade to clear 503s instead of pretending to work.
+  payments.init(mode);
+  admin.init(mode);
+
+  await settings.load();
+  await admin.bootstrap();
+  await accounts.refreshBanIps();
 
   matchmaker = new Matchmaker(io, store);
   matchmaker.startTicker(Number(process.env.PRESENCE_INTERVAL_MS) || 5000);
@@ -303,6 +469,11 @@ async function main() {
 
   console.info(`[http] listening on http://${HOST}:${PORT} (${servesClient ? 'api + spa' : 'api'})`);
   console.info(`[http] CORS origin(s): ${ORIGINS.join(', ')}`);
+  if (mode !== 'maria') {
+    console.warn(
+      '[admin] no database → /admin, payments and settings are disabled (MARIADB_* not configured)',
+    );
+  }
 }
 
 function shutdown(signal) {

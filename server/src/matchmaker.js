@@ -2,6 +2,8 @@ const crypto = require('crypto');
 const { CLIENT, SERVER } = require('./protocol');
 const { validateProfile, publicProfile, isMatch } = require('./matchmaking');
 const telemetry = require('./telemetry');
+const settings = require('./settings');
+const accounts = require('./accounts');
 
 /** Max SDP/ICE messages accepted per second from a single socket. */
 const SIGNAL_RATE_LIMIT = 80;
@@ -96,7 +98,13 @@ class Matchmaker {
   // ── Wiring ─────────────────────────────────────────────────────────────────
 
   attach(socket) {
-    socket.on(CLIENT.QUEUE_JOIN, (profile) => this.joinQueue(socket, profile));
+    socket.on(CLIENT.QUEUE_JOIN, (profile) => {
+      // `joinQueue` awaits the ban check — never let a rejected promise turn
+      // into an unhandled rejection that would take the process down.
+      Promise.resolve(this.joinQueue(socket, profile)).catch((err) =>
+        console.error('[matchmaker] queue:join failed:', err.message),
+      );
+    });
     socket.on(CLIENT.QUEUE_LEAVE, () => this.leaveQueue(socket));
     socket.on(CLIENT.CALL_END, () => this.endCall(socket, 'ended'));
     socket.on(CLIENT.SIGNAL, (msg) => this.relaySignal(socket, msg));
@@ -114,11 +122,64 @@ class Matchmaker {
         code: 'queue',
         message: 'That profile could not be validated. Please reload and try again.',
       });
-      return;
+      return Promise.resolve();
     }
 
     // Already inside a call: the client must end it before queueing again.
-    if (this.rooms.has(socket.id)) return;
+    if (this.rooms.has(socket.id)) return Promise.resolve();
+
+    return this.authorizeJoin(socket, profile).then(() => {
+      this.acceptJoin(socket, profile);
+    });
+  }
+
+  /**
+   * Everything a queue join must satisfy BEFORE anything is written:
+   *
+   *   • maintenance — the dashboard's kill switch (a `features.maintenance`
+   *     flip pauses matchmaking without a redeploy);
+   *   • bans — by username (the suspended account itself) and by address (the
+   *     network they are sitting on), so "new username, same laptop" is not a
+   *     way back in.
+   *
+   * A refusal is always a `server:error{code:'queue'}`, which the lobby renders
+   * as a normal error and leaves the user on the start screen.
+   */
+  async authorizeJoin(socket, profile) {
+    if (settings.get().features.maintenance) {
+      socket.emit(SERVER.ERROR, {
+        code: 'queue',
+        message: 'Matchmaking is paused for a few minutes of maintenance — try again shortly.',
+      });
+      return;
+    }
+
+    const ip = this.clientIp(socket);
+    if (accounts.ipBanned(ip) || (await accounts.isBanned(profile.username))) {
+      socket.emit(SERVER.ERROR, {
+        code: 'queue',
+        message: 'This account has been suspended. Contact support if you think this is a mistake.',
+      });
+      return;
+    }
+
+    // Keep the address a ban would later act on up to date (fire and forget).
+    accounts.noteQueueIp(profile.username, ip);
+  }
+
+  /**
+   * Where the browser is really connecting from: the platform (Koyeb, Render,
+   * Cloudflare) terminates TLS in front of us, so the truth is in
+   * X-Forwarded-For and `handshake.address` is only the proxy's address.
+   */
+  clientIp(socket) {
+    const xff = socket.handshake?.headers?.['x-forwarded-for'];
+    const first = Array.isArray(xff) ? xff[0] : xff;
+    const raw = String(first || socket.handshake?.address || '').split(',')[0].trim();
+    return raw.replace(/^::ffff:/i, '').slice(0, 45);
+  }
+
+  acceptJoin(socket, profile) {
 
     this.store.saveProfile(socket.id, profile);
     // Remember the profile on the socket itself: it is what powers the public

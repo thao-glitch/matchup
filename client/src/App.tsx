@@ -9,6 +9,7 @@ import PassportOverlay from './components/PassportOverlay';
 import { AlertIcon } from './components/icons';
 import { MediaError, hasLiveMedia, acquireLocalMedia, stopStream } from './lib/media';
 import { AuthError, loadAccount, saveAccountProfile } from './lib/auth';
+import { DEFAULT_CONFIG, loadConfig, type PublicConfig } from './lib/config';
 import { loadDraft, saveDraft } from './lib/draft';
 import { addStamp, syncPassport, uniqueCountries } from './lib/passport';
 import { createSignalingSocket, normalizeProfile, type AppSocket } from './lib/signaling';
@@ -74,6 +75,13 @@ export default function App() {
   const [stamp, setStamp] = useState<StampInfo | null>(null);
   /** Live chemistry score of the ongoing call (null before the first one). */
   const [compat, setCompat] = useState<number | null>(null);
+  /**
+   * Server-side switches (ads / sign-ups / payments / maintenance) — fetched
+   * once per page load from `/api/config` and edited in the `/admin` panel.
+   * Starting from the defaults means an unreachable config can never stop the
+   * lobby from rendering.
+   */
+  const [config, setConfig] = useState<PublicConfig>(DEFAULT_CONFIG);
 
   const socketRef = useRef<AppSocket | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -147,6 +155,18 @@ export default function App() {
       cancelled = true;
     };
   }, [applyAccount]);
+
+  // Feature switches + the paybill block, once per page load. `loadConfig`
+  // caches and never rejects, so this can neither hang nor throw.
+  useEffect(() => {
+    let cancelled = false;
+    void loadConfig().then((cfg) => {
+      if (!cancelled) setConfig(cfg);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // ── Signaling lifecycle ────────────────────────────────────────────────────
   useEffect(() => {
@@ -411,6 +431,7 @@ export default function App() {
           onOpenPassport={openPassport}
           busy={busy}
           error={error}
+          config={config}
         />
       )}
 
@@ -450,6 +471,15 @@ export default function App() {
       {boardOpen && <EuropeBoard onClose={closeBoard} />}
       {passportOpen && <PassportOverlay onClose={closePassport} />}
       {legal && <LegalPage page={legal} onClose={closeLegal} />}
+
+      {/* The dashboard's kill switch: matchmaking is paused, everything else
+          (reading, signing in, checking a payment) keeps working. */}
+      {config.features.maintenance && (
+        <div className="fixed inset-x-0 top-0 z-50 flex items-center justify-center gap-2 bg-warn/15 px-4 py-2 text-xs font-medium text-warn backdrop-blur">
+          <AlertIcon className="h-4 w-4" />
+          Matchmaking is paused for maintenance — check back in a few minutes.
+        </div>
+      )}
 
       {showBanner && (
         <div className="fixed inset-x-0 top-0 z-50 flex items-center justify-center gap-2 bg-warn/15 px-4 py-2 text-xs font-medium text-warn backdrop-blur">

@@ -111,6 +111,9 @@ function toUser(account) {
     username: account.username,
     profile: account.profile,
     createdAt: account.createdAt ? new Date(account.createdAt).toISOString() : null,
+    // Paybill entitlement: ISO timestamp or null. Purely informational for
+    // the client — the server is what decides whether premium applies.
+    premiumUntil: account.premiumUntil ? new Date(account.premiumUntil).toISOString() : null,
   };
 }
 
@@ -190,7 +193,7 @@ async function issueSession(accountId, username) {
 // ── Public API ──────────────────────────────────────────────────────────────
 
 /** Create an account + first session. The profile is validated here, not trusted. */
-async function register({ username, password, profile }) {
+async function register({ username, password, profile, ip }) {
   const creds = normalizeCredentials(username, password);
   const clean = validateProfile({ ...(profile || {}), username: creds.username });
   if (!clean) {
@@ -199,21 +202,125 @@ async function register({ username, password, profile }) {
 
   const passwordHash = await hashPassword(creds.password);
   const account = await insertAccount(creds.username, passwordHash, clean);
+  if (backend === 'maria' && ip) mariaStore.recordAccountIp(account.id, ip);
   const token = await issueSession(account.id, account.username);
   return { token, user: toUser({ ...account, profile: clean }) };
 }
 
 /** Verify credentials and open a session. Same error for unknown user / bad password. */
-async function login({ username, password }) {
+async function login({ username, password, ip }) {
   const creds = normalizeCredentials(username, password);
   const account = await lookupAccount(creds.username);
   const ok = await verifyPassword(creds.password, account?.passwordHash || DUMMY_HASH);
   if (!account || !ok) {
     throw new AuthError('credentials', 'Username or password is incorrect.', 401);
   }
+  // Suspended accounts authenticate nowhere: the password check above still
+  // runs in full, so this cannot be used to probe for banned usernames.
+  if (account.banned) {
+    throw new AuthError(
+      'banned',
+      'This account has been suspended. Contact support if you think this is a mistake.',
+      403,
+    );
+  }
   const token = await issueSession(account.id, account.username);
-  if (backend === 'maria') mariaStore.touchAccount(account.id).catch(() => undefined);
+  if (backend === 'maria') {
+    mariaStore.touchAccount(account.id).catch(() => undefined);
+    if (ip) mariaStore.recordAccountIp(account.id, ip);
+  }
   return { token, user: toUser(account) };
+}
+
+/**
+ * Is this username suspended? Answers from a 30s cache so the matchmaker can
+ * ask on every `queue:join` without a round-trip per queueing user.
+ * `null` (unknown / no database) always means "not banned".
+ */
+let banCache = { at: 0, map: new Map() };
+async function isBanned(username) {
+  const key = String(username || '').toLowerCase();
+  if (!key || backend !== 'maria') return false;
+  const now = Date.now();
+  if (now - banCache.at > 30_000) {
+    banCache = { at: now, map: new Map() };
+  }
+  if (banCache.map.has(key)) return banCache.map.get(key);
+  try {
+    const row = await mariaStore.findAccountByUsername(username);
+    const banned = Boolean(row && row.banned);
+    banCache.map.set(key, banned);
+    return banned;
+  } catch {
+    // The database is down: never lock everyone out of the queue over it.
+    return false;
+  }
+}
+
+/** Called after a dashboard ban/unban so the cache above cannot go stale. */
+function invalidateBanCache(username) {
+  const key = String(username || '').toLowerCase();
+  banCache.at = 0;
+  if (key) banCache.map.delete(key);
+}
+
+// ── Ban enforcement across the whole app ─────────────────────────────────────
+
+/**
+ * Addresses a suspended account last signed in from. A ban that only knows
+ * usernames is trivially sidestepped by picking a new one, so the matchmaker
+ * also refuses `queue:join` from any socket on a banned address. Refreshed at
+ * boot and on every ban/unban; an empty set simply means "no bans to honour".
+ */
+let bannedIps = new Set();
+
+async function refreshBanIps() {
+  if (backend !== 'maria') return bannedIps;
+  try {
+    const rows = await mariaStore.loadBannedIps();
+    bannedIps = new Set(rows.map((r) => r.ip).filter(Boolean));
+  } catch (err) {
+    // Keep whatever we had: a database blip must not un-ban the world.
+    console.error('[auth] ban IP refresh failed:', err.message);
+  }
+  return bannedIps;
+}
+
+function ipBanned(ip) {
+  return Boolean(ip) && bannedIps.has(String(ip));
+}
+
+/** username -> { id, at } so a queue join costs at most one lookup per minute. */
+const idCache = new Map();
+const ID_CACHE_TTL_MS = 60_000;
+
+/**
+ * Record the address someone is currently queueing from against their account.
+ * Fire-and-forget and best effort: matchmaking must never wait on it, and a
+ * database that is down simply means the ban list stays as accurate as it was.
+ */
+function noteQueueIp(username, ip) {
+  if (backend !== 'maria' || !ip || !username) return;
+  const key = String(username).toLowerCase();
+  const now = Date.now();
+  const cached = idCache.get(key);
+  if (cached && now - cached.at < ID_CACHE_TTL_MS) return;
+  idCache.set(key, { id: cached?.id ?? null, at: now });
+
+  const apply = (id) => {
+    if (!id) return;
+    idCache.set(key, { id, at: now });
+    mariaStore.recordAccountIp(id, ip);
+  };
+
+  if (cached?.id) {
+    apply(cached.id);
+    return;
+  }
+  mariaStore
+    .findAccountByUsername(username)
+    .then((row) => apply(row?.id ?? null))
+    .catch(() => undefined);
 }
 
 /** Resolve a bearer token to its user, or `null` when it is missing/expired. */
@@ -224,7 +331,14 @@ async function authenticate(token) {
   if (backend === 'maria') {
     try {
       const account = await mariaStore.findSession(hash);
-      return account ? toUser(account) : null;
+      if (!account) return null;
+      if (account.banned) {
+        // A ban revokes access immediately, not at the next password login:
+        // drop the live session so the very next request fails closed.
+        await mariaStore.deleteSession(hash).catch(() => undefined);
+        return null;
+      }
+      return toUser(account);
     } catch (err) {
       console.error('[auth] session lookup failed:', err.message);
       return null;
@@ -298,6 +412,15 @@ module.exports = {
   authenticate,
   saveProfile,
   logout,
+  // Shared with `admin.js`: the dashboard hashes with the exact same scrypt
+  // parameters, so there is one password implementation in the codebase.
+  hashPassword,
+  verifyPassword,
+  isBanned,
+  invalidateBanCache,
+  refreshBanIps,
+  ipBanned,
+  noteQueueIp,
   backend: () => backend,
   /** Test seam: wipe the in-memory backend between suites. */
   _reset() {
