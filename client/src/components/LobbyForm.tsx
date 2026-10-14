@@ -19,6 +19,7 @@ import {
 import { AlertIcon, GlobeIcon, SpinnerIcon } from './icons';
 import AdSlot from './AdSlot';
 import PaymentPanel from './PaymentPanel';
+import { LOBBY_FEATURES } from '../lib/callFeatures';
 import type { PublicConfig } from '../lib/config';
 
 interface Props {
@@ -583,6 +584,34 @@ export default function LobbyForm({
           </p>
         )}
       </form>
+
+      {/* ── What a call can do ──────────────────────────────────────────────
+          The feature tour: six cards selling the in-call toolkit, placed
+          after the form so the "Start matching" action stays as high on the
+          page as possible. Copy lives in lib/callFeatures.ts next to the
+          implementations, so advert and product cannot drift apart. */}
+      <section aria-label="What every call comes with" className="mt-9">
+        <h2 className="text-center text-sm font-semibold uppercase tracking-wide text-muted">
+          More than a video call
+        </h2>
+        <p className="mx-auto mt-1 max-w-md text-center text-xs leading-relaxed text-muted">
+          Everything here is live the moment you match — no setup, no extra taps.
+        </p>
+        <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3">
+          {LOBBY_FEATURES.map((f) => (
+            <div
+              key={f.id}
+              className="rounded-xl border border-white/10 bg-surface-3/50 px-4 py-3 text-left"
+            >
+              <span className="text-xl" aria-hidden="true">
+                {f.emoji}
+              </span>
+              <p className="mt-1 text-sm font-semibold text-ink">{f.name}</p>
+              <p className="mt-0.5 text-xs leading-relaxed text-muted">{f.blurb}</p>
+            </div>
+          ))}
+        </div>
+      </section>
 
       {/* Renders nothing unless the build carries VITE_ADSENSE_* — localhost,
           the tests and pre-approval deployments stay completely ad-free.

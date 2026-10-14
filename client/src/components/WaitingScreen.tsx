@@ -3,6 +3,7 @@ import type { AppError, WaitingStatus } from '../types';
 import { SIGNALING_URL } from '../lib/iceServers';
 import { passportState } from '../lib/passport';
 import { countryName } from '../lib/countries';
+import { WAITING_TIPS } from '../lib/callFeatures';
 import { AlertIcon, SpinnerIcon, UsersIcon, flagFromCountry } from './icons';
 
 interface Props {
@@ -33,6 +34,18 @@ export default function WaitingScreen({
   const [jitter, setJitter] = useState(() => Math.floor(Math.random() * 5) - 2);
   /** Countries online right now that are missing from the passport. */
   const [collectable, setCollectable] = useState<string[]>([]);
+  /** Index into the rotating "your call comes with" tour — random start so
+      two people queuing side by side see different tips. */
+  const [tipIdx, setTipIdx] = useState(() => Math.floor(Math.random() * WAITING_TIPS.length));
+
+  // The feature tour: queue time is the one moment a user is guaranteed to
+  // read — spend it teaching the dock buttons they are about to get.
+  useEffect(() => {
+    const id = setInterval(() => {
+      setTipIdx((i) => (i + 1) % WAITING_TIPS.length);
+    }, 4500);
+    return () => clearInterval(id);
+  }, []);
 
   // "Collect while you wait" — polling the live board turns dead queue time
   // into anticipation: you can SEE the countries you're one match away from.
@@ -83,6 +96,7 @@ export default function WaitingScreen({
 
   const displayOnline = Math.max(1, presence.online + jitter);
   const looking = Math.max(1, presence.looking);
+  const tip = WAITING_TIPS[tipIdx];
 
   return (
     <div className="relative z-10 mx-auto flex min-h-full w-full max-w-2xl flex-col items-center justify-center px-4 py-10 text-center">
@@ -158,6 +172,21 @@ export default function WaitingScreen({
             </p>
           </div>
         )}
+
+        {/* Rotating feature tour — "everything below is in the call you're
+            about to have". Keyed on the feature so each swap replays the
+            pop-in; the static header keeps the block readable between swaps. */}
+        <div className="mt-4 rounded-xl border border-white/10 bg-surface-3/50 px-4 py-3 text-left">
+          <p className="text-xs font-semibold uppercase tracking-wide text-muted">
+            Your call comes with
+          </p>
+          <p key={tip.id} className="animate-pop mt-1 text-sm leading-relaxed text-muted">
+            <span className="font-semibold text-ink">
+              {tip.emoji} {tip.name}
+            </span>{' '}
+            — {tip.tip}
+          </p>
+        </div>
 
         <p className="mt-4 text-xs text-muted">
           Waiting for {formatDuration(elapsed)} · we’ll connect you the moment a match is
