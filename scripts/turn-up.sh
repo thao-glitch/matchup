@@ -48,6 +48,20 @@ if [ -z "$PRIV" ] || [ -z "$PUB" ]; then
   exit 1
 fi
 
+# The IP-echo endpoints answer through whatever proxy sits in front of them,
+# and a failed fetch returns that proxy's *error page body*, not an IP. That
+# once happened here: an Envoy `upstream connect error …` message was written
+# into TURN_URLS, the browser rejected the whole ICE config
+# (`Invalid hostname format`) and every video call in the app failed. Refuse
+# anything that is not IP/hostname-shaped before it can reach server/.env.
+case "$PRIV/$PUB" in
+  *[!A-Za-z0-9./-]*)
+    echo "✗ detected addresses are not IP/hostname-shaped (private='$PRIV' public='$PUB')." >&2
+    echo "  Set them explicitly: TURN_PUBLIC_IP=… TURN_PRIVATE_IP=… $0" >&2
+    exit 1
+    ;;
+esac
+
 # ── keep server/.env pointing at this machine ────────────────────────────────
 # The container's external-ip is only half the job: the URL list the browsers
 # are handed lives in .env. Rewriting it here is what makes "an ISP address

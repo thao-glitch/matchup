@@ -1,4 +1,5 @@
 import type { CallState, NetworkStats, PathType, SignalMessage } from '../types';
+import { FALLBACK_ICE_SERVERS } from './iceServers';
 
 type OutgoingSignal = Omit<SignalMessage, 'roomId'>;
 
@@ -79,17 +80,7 @@ export class Peer {
   constructor(private readonly opts: PeerOptions) {
     this.polite = !opts.initiator;
 
-    this.pc = new RTCPeerConnection({
-      iceServers: opts.iceServers,
-      // `'relay'` (from `?relay=1`) forces every candidate through TURN — used
-      // to verify the relay path end to end without needing a strict NAT.
-      iceTransportPolicy: opts.iceTransportPolicy ?? 'all',
-      // Gather a few candidates in parallel — trades a little bandwidth for a
-      // noticeably shorter time-to-first-frame on lossy links.
-      iceCandidatePoolSize: 4,
-      bundlePolicy: 'max-bundle',
-      rtcpMuxPolicy: 'require',
-    });
+    this.pc = this.createPeerConnection();
 
     for (const track of opts.localStream.getTracks()) {
       // Only attach live tracks; a camera the user turned off still has
@@ -115,6 +106,37 @@ export class Peer {
 
     this.setState('connecting');
     this.armConnectWatchdog(CONNECT_TIMEOUT_MS);
+  }
+
+  /**
+   * Build the RTCPeerConnection, degrading to STUN-only if the browser
+   * rejects the ICE config outright.
+   *
+   * `getIceConfig()` already filters malformed URLs, but a constructor throw
+   * here would fail *every* call instead of merely losing the relay path —
+   * and that exact failure has happened in production: one bad `TURN_URLS`
+   * line made `new RTCPeerConnection()` throw
+   * `SyntaxError: ICE server parsing failed: Invalid hostname format` and
+   * video chat died app-wide until the value was caught.
+   */
+  private createPeerConnection(): RTCPeerConnection {
+    const config: RTCConfiguration = {
+      iceServers: this.opts.iceServers,
+      // `'relay'` (from `?relay=1`) forces every candidate through TURN — used
+      // to verify the relay path end to end without needing a strict NAT.
+      iceTransportPolicy: this.opts.iceTransportPolicy ?? 'all',
+      // Gather a few candidates in parallel — trades a little bandwidth for a
+      // noticeably shorter time-to-first-frame on lossy links.
+      iceCandidatePoolSize: 4,
+      bundlePolicy: 'max-bundle',
+      rtcpMuxPolicy: 'require',
+    };
+    try {
+      return new RTCPeerConnection(config);
+    } catch (err) {
+      console.warn('[peer] browser rejected the ICE config; retrying STUN-only:', err);
+      return new RTCPeerConnection({ ...config, iceServers: FALLBACK_ICE_SERVERS });
+    }
   }
 
   // ── Public API ──────────────────────────────────────────────────────────────

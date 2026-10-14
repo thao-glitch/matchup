@@ -117,12 +117,60 @@ function turnHosts(servers) {
 
 let cached = null; // { iceServers, expiresAt, source }
 let inflight = null;
-let warned = false;
+/**
+ * One warning per *distinct* message (not per process): a malformed TURN URL
+ * and a "running STUN-only" notice can both be worth printing on the same
+ * boot, and operators need the full picture to debug the ICE path.
+ */
+const warnedMessages = new Set();
 
 function warnOnce(message) {
-  if (warned) return;
-  warned = true;
+  if (warnedMessages.has(message)) return;
+  warnedMessages.add(message);
   console.warn(`[ice] ${message}`);
+}
+
+/**
+ * Strict syntax check for a `stun`/`stuns`/`turn`/`turns` URL.
+ *
+ * One malformed TURN entry is catastrophic: browsers reject the **entire**
+ * RTCConfiguration with `ICE server parsing failed: Invalid hostname format`,
+ * so `new RTCPeerConnection()` throws and every call in the app dies — not
+ * just the relay path. This is not theoretical: `scripts/turn-up.sh` once
+ * wrote a failed proxy response (`turn:upstream connect error …`) into
+ * `TURN_URLS` in `server/.env`, and video chat broke on every screen until
+ * the value was caught here.
+ */
+const ICE_URL_RE =
+  /^(stun|stuns|turn|turns):(\[[0-9a-fA-F:.]+\]|[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)(:\d{1,5})?(\?\S*)?$/;
+
+function isWellFormedIceUrl(url) {
+  return ICE_URL_RE.test(String(url));
+}
+
+/** Filter step for env lists: valid URLs pass, garbage is dropped loudly. */
+function requireWellFormed(url) {
+  if (isWellFormedIceUrl(url)) return true;
+  warnOnce(`discarding malformed ICE URL (check TURN_URLS in server/.env): ${JSON.stringify(String(url))}`);
+  return false;
+}
+
+/**
+ * Last stop before a response leaves the server: drop any ICE server whose
+ * URL would make the browser throw. The environment lists are already
+ * filtered above, so this mainly guards third-party payloads (Twilio /
+ * Cloudflare) and future callers.
+ */
+function sanitizeIceServers(servers) {
+  if (!Array.isArray(servers)) return [];
+  const out = [];
+  for (const server of servers) {
+    if (!server) continue;
+    const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
+    if (urls.length && urls.every((u) => isWellFormedIceUrl(u))) out.push(server);
+    else warnOnce(`discarding malformed ICE server entry: ${JSON.stringify(server.urls)}`);
+  }
+  return out;
 }
 
 function normalizeServer(server) {
@@ -219,7 +267,7 @@ function configuredTurnUrls() {
   const list = urls
     .split(',')
     .map((u) => u.trim())
-    .filter(Boolean);
+    .filter((u) => u && requireWellFormed(u));
   return list.length ? list : null;
 }
 
@@ -237,7 +285,7 @@ function configuredLocalTurnUrls() {
   return urls
     .split(',')
     .map((u) => u.trim())
-    .filter(Boolean);
+    .filter((u) => u && requireWellFormed(u));
 }
 
 /** Loopback or RFC1918/ULA ⇒ the caller is us or someone on this LAN. */
@@ -365,18 +413,25 @@ async function resolveIce() {
  */
 async function getIceConfig({ local = false } = {}) {
   const base = await resolveIce();
+  // Authoritative filter: whatever came back (env, Twilio, Cloudflare) must
+  // be safe to hand to `new RTCPeerConnection()` or *every* call breaks.
+  const cleaned = sanitizeIceServers(base.iceServers);
+  const sanitized =
+    cleaned.length > 0
+      ? { ...base, iceServers: cleaned }
+      : stunOnly('every configured ICE URL was malformed');
   const localUrls = configuredLocalTurnUrls();
-  if (!local || !localUrls.length) return base;
+  if (!local || !localUrls.length) return sanitized;
 
-  const turn = (base.iceServers || []).find((server) => {
+  const turn = (sanitized.iceServers || []).find((server) => {
     const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
     return urls.some((u) => String(u).startsWith('turn')) && server.username && server.credential;
   });
-  if (!turn) return base; // STUN-only — nothing to duplicate
+  if (!turn) return sanitized; // STUN-only — nothing to duplicate
 
   return {
-    ...base,
-    iceServers: [{ urls: localUrls, username: turn.username, credential: turn.credential }, ...base.iceServers],
+    ...sanitized,
+    iceServers: [{ urls: localUrls, username: turn.username, credential: turn.credential }, ...sanitized.iceServers],
   };
 }
 
@@ -417,7 +472,7 @@ function describeIce() {
 
 function resetIceCache() {
   cached = null;
-  warned = false;
+  warnedMessages.clear();
 }
 
 module.exports = {

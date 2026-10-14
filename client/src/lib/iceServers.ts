@@ -54,8 +54,22 @@ export interface IceConfig {
 let cached: IceConfig | null = null;
 let inflight: Promise<IceConfig> | null = null;
 
+/**
+ * ICE URL syntax check — the client-side twin of the server's validator in
+ * `server/src/iceConfig.js`.
+ *
+ * The stakes are asymmetric: a TURN server *without credentials* merely wastes
+ * an ICE round, but one *malformed URL* makes the browser reject the whole
+ * RTCConfiguration (`SyntaxError: ICE server parsing failed: Invalid hostname
+ * format`) — `new RTCPeerConnection()` throws and the call can never start.
+ * So every URL must parse before we hand the list over.
+ */
+const ICE_URL_RE =
+  /^(stun|stuns|turn|turns):(\[[0-9a-fA-F:.]+\]|[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)(:\d{1,5})?(\?\S*)?$/;
+
 function isUsable(server: RTCIceServer): boolean {
   const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
+  if (!urls.length || !urls.every((u) => ICE_URL_RE.test(String(u)))) return false;
   const isTurn = urls.some((u) => String(u).startsWith('turn'));
   // Never hand a TURN server without credentials to RTCPeerConnection — the
   // browser would waste an ICE round trying and failing on it.
