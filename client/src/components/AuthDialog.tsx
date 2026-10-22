@@ -71,7 +71,20 @@ export default function AuthDialog({ context, onSignedIn, onDismiss }: AuthDialo
   const canSubmit = username.trim().length >= 2 && password.length >= 6;
 
   return (
-    <form onSubmit={(event) => void submit(event)} className="card w-full max-w-sm p-6">
+    <form onSubmit={(event) => void submit(event)} className="card w-full max-w-sm overflow-hidden p-0">
+      <div className="relative" aria-hidden="true">
+        <img
+          src="/img/link-match.webp"
+          alt=""
+          loading="lazy"
+          className="photo h-24 w-full"
+        />
+        <div className="absolute inset-0 photo-scrim" />
+        <p className="absolute bottom-2.5 left-4 text-xs font-bold tracking-tight text-ink">
+          Matchup
+        </p>
+      </div>
+      <div className="p-6 pt-4">
       <h2 className="text-base font-bold text-ink">Sign in to Matchup</h2>
       <p className="mt-1 text-xs leading-relaxed text-muted">
         {context ?? 'One account for posting, paying and calling.'}
@@ -128,6 +141,7 @@ export default function AuthDialog({ context, onSignedIn, onDismiss }: AuthDialo
             Not now
           </button>
         )}
+      </div>
       </div>
     </form>
   );

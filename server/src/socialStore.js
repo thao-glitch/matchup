@@ -265,8 +265,18 @@ async function listPosts({
 /** Feed items → viewer-specific flags in two batched queries, not 2×N. */
 async function decorateForViewer(posts, accountId) {
   if (!posts.length) return posts;
+  // `mediaUrl` follows the same rule as the detail route: a viewer who may
+  // see the media (free, or paid for) gets the gated URL; everyone else gets
+  // null. Without this the feed/explore lists never carry a URL at all and
+  // every image post would render its "Media unavailable" fallback.
+  const urlFor = (p, owned) => (owned && p.mediaKey ? `/api/posts/${p.id}/media` : null);
   if (!accountId) {
-    return posts.map((p) => ({ ...p, liked: false, owned: p.price <= 0 }));
+    return posts.map((p) => ({
+      ...p,
+      liked: false,
+      owned: p.price <= 0,
+      mediaUrl: urlFor(p, p.price <= 0),
+    }));
   }
   const ids = posts.map((p) => p.id);
   const placeholders = ids.map(() => '?').join(',');
@@ -284,11 +294,15 @@ async function decorateForViewer(posts, accountId) {
   ]);
   const likedSet = new Set(likes.map((r) => Number(r.post_id)));
   const ownedSet = new Set(owned.map((r) => Number(r.ref_id)));
-  return posts.map((p) => ({
-    ...p,
-    liked: likedSet.has(p.id),
-    owned: p.price <= 0 || ownedSet.has(p.id),
-  }));
+  return posts.map((p) => {
+    const owned = p.price <= 0 || ownedSet.has(p.id);
+    return {
+      ...p,
+      liked: likedSet.has(p.id),
+      owned,
+      mediaUrl: urlFor(p, owned),
+    };
+  });
 }
 
 async function updatePostStatus(id, status) {

@@ -121,7 +121,10 @@ async function cleanup() {
   try {
     const ids = [];
     for (const name of [CREATOR, BUYER]) {
-      const [rows] = await run('SELECT id FROM accounts WHERE username = ?', [name]);
+      // `run` already unwraps the query tuple, so this is the rows array —
+      // destructuring it again would hand back the first row *object* and
+      // silently skip every delete below.
+      const rows = await run('SELECT id FROM accounts WHERE username = ?', [name]);
       if (rows[0]) ids.push(Number(rows[0].id));
     }
     if (ids.length) {

@@ -136,10 +136,34 @@ export default function FeedPage({
 
   return (
     <div className="space-y-4">
-      {/* ── Header: title, count, adult switch, refresh ─────────────────── */}
+      {/* ── Hero: a photographic banner over the crowd shot, scrimmed so the
+             type stays readable at every width. Purely presentational — the
+             controls live in the header right below it. */}
+      <section className="relative overflow-hidden rounded-3xl border border-white/10" aria-hidden="true">
+        <img
+          src="/img/hero-feed.webp"
+          alt=""
+          loading="eager"
+          className="photo h-40 w-full sm:h-56"
+        />
+        <div className="absolute inset-0 photo-scrim" />
+        <div className="absolute inset-0 flex flex-col justify-end p-5 sm:p-7">
+          <p className="animate-rise-in text-[11px] font-semibold uppercase tracking-[0.2em] text-accent">
+            Creators · Fans · M-PESA
+          </p>
+          <h1 className="animate-rise-in mt-1.5 max-w-xl text-2xl font-bold tracking-tight text-ink sm:text-3xl">
+            Something is always happening here
+          </h1>
+          <p className="animate-rise-in mt-1 max-w-md text-sm leading-relaxed text-muted">
+            Free posts, paid drops and everything in between — unlock what you like with one tap.
+          </p>
+        </div>
+      </section>
+
+      {/* ── Header: count, adult switch, refresh ─────────────────────────── */}
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <h1 className="text-xl font-bold text-ink">Feed</h1>
+          <h2 className="text-xl font-bold text-ink">Feed</h2>
           <p className="text-xs text-muted">
             {loading ? 'Loading…' : `${total} post${total === 1 ? '' : 's'}`}
           </p>
@@ -213,12 +237,23 @@ export default function FeedPage({
 
       {/* ── Empty ───────────────────────────────────────────────────────── */}
       {!loading && items.length === 0 && !error && (
-        <div className="card p-8 text-center">
-          <p className="text-sm font-semibold text-ink">Nothing here yet — be the first to post</p>
-          <p className="mt-1 text-xs text-muted">Photos, videos, links or plain text — free or paid.</p>
-          <Link to="/create" className="btn btn-primary mt-4">
-            Create a post
-          </Link>
+        <div className="card overflow-hidden text-center">
+          <div className="relative">
+            <img
+              src="/img/empty-feed.webp"
+              alt=""
+              loading="lazy"
+              className="photo h-40 w-full sm:h-52"
+            />
+            <div className="absolute inset-0 photo-scrim" />
+          </div>
+          <div className="p-6 pt-4">
+            <p className="text-sm font-semibold text-ink">Nothing here yet — be the first to post</p>
+            <p className="mt-1 text-xs text-muted">Photos, videos, links or plain text — free or paid.</p>
+            <Link to="/create" className="btn btn-primary mt-4">
+              Create a post
+            </Link>
+          </div>
         </div>
       )}
 
@@ -278,7 +313,7 @@ function PostCard({ post, onLike, onComment }: PostCardProps) {
       {/* Creator row */}
       <div className="flex items-center gap-3 px-4 pt-4">
         <span className="relative block h-9 w-9 shrink-0">
-          <span className="flex h-9 w-9 items-center justify-center rounded-full bg-accent/20 text-sm font-bold text-accent">
+          <span className="flex h-9 w-9 items-center justify-center rounded-full bg-gradient-to-br from-accent/40 to-accent-2/40 ring-2 ring-accent/30 text-sm font-bold text-ink">
             {post.creatorName.slice(0, 1).toUpperCase()}
           </span>
           <span className="absolute -bottom-1 -right-1 text-xs leading-none">
@@ -312,7 +347,7 @@ function PostCard({ post, onLike, onComment }: PostCardProps) {
               src={post.mediaUrl}
               alt={post.caption || 'Post image'}
               loading="lazy"
-              className="max-h-[70vh] w-full object-cover"
+              className="photo max-h-[70vh] w-full"
             />
           )}
           {post.mediaUrl && post.type === 'video' && (

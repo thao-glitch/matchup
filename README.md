@@ -164,6 +164,11 @@ cd client && npm run dev          # http://localhost:5173  (proxies to :4000)
 
 # …or from the repo root:
 npm run dev
+
+# 4. Optional: fill the feed with demo content — 10 photo posts from 4
+#    creators (free + priced), likes and comments, all through the real API.
+#    Re-running is safe: seeded creators are skipped, stale test rows swept.
+npm run seed
 ```
 
 Open **two tabs** on `http://localhost:5173`, fill in two complementary profiles

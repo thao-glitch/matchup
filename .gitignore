@@ -18,5 +18,8 @@ npm-debug.log*
 .sync.lock
 .sync.log
 
+# User-uploaded media — runtime data, recreated by every upload
+server/uploads/
+
 # Local deployment credentials (never commit)
 .deploy.env

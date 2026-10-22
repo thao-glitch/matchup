@@ -246,7 +246,7 @@ export default function CreatePostPage({
           {preview && (
             <div className="mt-3 overflow-hidden rounded-xl border border-white/10">
               {type === 'image' ? (
-                <img src={preview} alt="Preview" className="max-h-64 w-full object-cover" />
+                <img src={preview} alt="Preview" className="photo max-h-64 w-full" />
               ) : (
                 <video src={preview} controls playsInline className="max-h-64 w-full bg-black" />
               )}

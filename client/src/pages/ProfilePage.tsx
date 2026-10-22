@@ -277,7 +277,7 @@ export default function ProfilePage({
                       src={post.mediaUrl}
                       alt={post.caption || 'Your post'}
                       loading="lazy"
-                      className="h-28 w-full object-cover"
+                      className="photo h-28 w-full"
                     />
                   ) : (
                     <video

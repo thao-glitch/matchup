@@ -8,21 +8,18 @@
  * from here. No invented "top creators" — the API has no such ranking and a
  * fabricated one would be worse than none.
  */
-import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import type { PageProps } from '../shell/pageProps';
 import type { Post } from '../types/social';
 import { SocialError, formatKes, likePost, listPosts, timeAgo } from '../lib/social';
 import { Link, navigate } from '../lib/router';
 import {
-  CamIcon,
   CommentIcon,
   GlobeIcon,
   HeartIcon,
   LockIcon,
-  PlusIcon,
   SearchIcon,
   SpinnerIcon,
-  VideoIcon,
   flagFromCountry,
 } from '../components/icons';
 
@@ -336,19 +333,24 @@ export default function ExplorePage({
       <div>
         <p className="label">Jump to</p>
         <div className="grid gap-3 sm:grid-cols-3">
-          <LinkCard
+          <PhotoLinkCard
             to="/live"
-            icon={VideoIcon}
+            img="/img/link-live.webp"
             title="Live rooms"
             text="Group calls and 18+ conferences"
           />
-          <LinkCard
+          <PhotoLinkCard
             to="/create"
-            icon={PlusIcon}
+            img="/img/link-create.webp"
             title="Post content"
             text="Photo, video, link or text"
           />
-          <LinkCard to="/match" icon={CamIcon} title="Random 1v1" text="Video chat with a stranger" />
+          <PhotoLinkCard
+            to="/match"
+            img="/img/link-match.webp"
+            title="Random 1v1"
+            text="Video chat with a stranger"
+          />
         </div>
       </div>
     </div>
@@ -374,7 +376,7 @@ function ExploreCard({ post, onLike }: CardProps) {
     >
       <div className="flex items-center gap-3 px-4 pt-4">
         <span className="relative block h-8 w-8 shrink-0">
-          <span className="flex h-8 w-8 items-center justify-center rounded-full bg-accent/20 text-xs font-bold text-accent">
+          <span className="flex h-8 w-8 items-center justify-center rounded-full bg-gradient-to-br from-accent/40 to-accent-2/40 ring-2 ring-accent/30 text-xs font-bold text-ink">
             {post.creatorName.slice(0, 1).toUpperCase()}
           </span>
           <span className="absolute -bottom-1 -right-1 text-[11px] leading-none">
@@ -407,7 +409,7 @@ function ExploreCard({ post, onLike }: CardProps) {
               src={post.mediaUrl as string}
               alt={post.caption || 'Post image'}
               loading="lazy"
-              className="max-h-52 w-full object-cover"
+              className="photo max-h-52 w-full"
             />
           )}
           {hasMedia && post.type === 'video' && (
@@ -487,25 +489,31 @@ function ExploreCard({ post, onLike }: CardProps) {
   );
 }
 
-interface LinkCardProps {
+interface PhotoLinkCardProps {
   to: string;
-  icon: (props: { className?: string }) => ReactNode;
+  img: string;
   title: string;
   text: string;
 }
 
-function LinkCard({ to, icon: Icon, title, text }: LinkCardProps) {
+/**
+ * Photo tile — a real image under a scrim, title bottom-left. The whole tile
+ * is the link; `.group` + `.photo-link` give the slow zoom on hover.
+ */
+function PhotoLinkCard({ to, img, title, text }: PhotoLinkCardProps) {
   return (
     <Link
       to={to}
-      className="card flex items-start gap-3 p-4 transition-colors hover:border-accent/40"
+      className="group relative block h-36 overflow-hidden rounded-2xl border border-white/10 transition-colors hover:border-accent/40"
     >
-      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-accent/15 text-accent">
-        <Icon className="h-5 w-5" />
-      </span>
-      <span className="min-w-0">
-        <span className="block text-sm font-semibold text-ink">{title}</span>
+      <img src={img} alt="" loading="lazy" className="photo-link absolute inset-0 h-full w-full" />
+      <div className="absolute inset-0 photo-scrim" />
+      <div className="absolute inset-x-0 bottom-0 p-4">
+        <span className="block text-sm font-bold text-ink">{title}</span>
         <span className="mt-0.5 block text-xs leading-relaxed text-muted">{text}</span>
+      </div>
+      <span className="absolute right-3 top-3 rounded-full border border-white/20 bg-black/40 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-ink opacity-0 backdrop-blur transition-opacity group-hover:opacity-100">
+        Open
       </span>
     </Link>
   );

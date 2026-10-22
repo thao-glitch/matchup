@@ -174,14 +174,21 @@ export default function LivePage({
 
   return (
     <div className="space-y-7">
-      {/* ── Hero: the 1v1 entry point ─────────────────────────────────────── */}
-      <section className="card relative overflow-hidden p-6 sm:p-8">
+      {/* ── Hero: the 1v1 entry point, over a live-crowd photograph ──────── */}
+      <section className="relative overflow-hidden rounded-3xl border border-white/10">
+        <img
+          src="/img/hero-live.webp"
+          alt=""
+          loading="eager"
+          className="photo absolute inset-0 h-full w-full"
+        />
+        <div className="absolute inset-0 photo-scrim" />
         <div
           className="pointer-events-none absolute -right-16 -top-16 h-56 w-56 rounded-full bg-accent/20 blur-3xl"
           aria-hidden="true"
         />
-        <div className="relative">
-          <span className="inline-flex items-center gap-2 rounded-full border border-accent/30 bg-accent/10 px-3 py-1 text-xs font-semibold text-accent">
+        <div className="relative p-6 sm:p-8">
+          <span className="inline-flex items-center gap-2 rounded-full border border-accent/30 bg-accent/10 px-3 py-1 text-xs font-semibold text-accent backdrop-blur">
             <VideoIcon className="h-4 w-4" />
             Random 1v1 video chat
           </span>
@@ -205,7 +212,7 @@ export default function LivePage({
             {LOBBY_FEATURES.map((feature) => (
               <li
                 key={feature.id}
-                className="flex items-start gap-2.5 rounded-xl border border-white/10 bg-surface-3/50 px-3 py-2.5"
+                className="flex items-start gap-2.5 rounded-xl border border-white/15 bg-surface/80 px-3 py-2.5 backdrop-blur"
               >
                 <span className="text-base leading-none" aria-hidden="true">
                   {feature.emoji}

@@ -306,7 +306,7 @@ export default function PostDetailPage({
             <img
               src={post.mediaUrl as string}
               alt={post.caption || 'Post image'}
-              className="max-h-[75vh] w-full rounded-2xl object-cover"
+              className="photo max-h-[75vh] w-full rounded-2xl"
             />
           )}
           {showMedia && post.type === 'video' && (

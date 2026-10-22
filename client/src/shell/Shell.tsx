@@ -182,10 +182,11 @@ export default function Shell() {
   return (
     <div className="app-bg relative flex min-h-full flex-col">
       {!fullBleed && (
-        <header className="sticky top-0 z-40 border-b border-white/10 bg-surface/80 backdrop-blur">
+        <header className="sticky top-0 z-40 border-b border-white/10 bg-surface/80 backdrop-blur supports-[backdrop-filter]:bg-surface/65">
+          <div className="absolute inset-x-0 bottom-0 h-px bg-gradient-to-r from-transparent via-accent/50 to-transparent" aria-hidden="true" />
           <div className="mx-auto flex w-full max-w-5xl items-center justify-between gap-3 px-4 py-3">
             <Link to="/" className="flex items-center gap-2" aria-label="Matchup home">
-              <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-accent to-accent-2 text-xs font-black text-white">
+              <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-accent to-accent-2 text-xs font-black text-white shadow-[0_6px_16px_-6px_rgba(91,140,255,0.9)]">
                 M
               </span>
               <span className="text-sm font-bold tracking-tight text-ink">Matchup</span>
@@ -236,6 +237,7 @@ export default function Shell() {
 
       {!fullBleed && (
         <nav className="fixed inset-x-0 bottom-0 z-40 border-t border-white/10 bg-surface/90 backdrop-blur">
+          <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-accent/40 to-transparent" aria-hidden="true" />
           <div className="mx-auto grid w-full max-w-5xl grid-cols-6">
             {TABS.map((tab) => {
               const active = tab.to === path;

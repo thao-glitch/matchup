@@ -421,18 +421,31 @@ export default function App() {
       }`}
     >
       {phase === 'lobby' && (
-        <LobbyForm
-          account={account}
-          draft={draft}
-          onStart={start}
-          onAccountChange={applyAccount}
-          onOpenBoard={openBoard}
-          passportUnique={passportUnique}
-          onOpenPassport={openPassport}
-          busy={busy}
-          error={error}
-          config={config}
-        />
+        <>
+          {/* Backdrop: earth at night behind the lobby — the product's pitch
+              (strangers, worldwide) as the first thing you see. Decorative
+              only: scrimmed and aria-hidden, the form sits above it. */}
+          <div className="pointer-events-none fixed inset-0 z-0 overflow-hidden" aria-hidden="true">
+            <img
+              src="/img/hero-match.webp"
+              alt=""
+              className="photo h-full w-full scale-105"
+            />
+            <div className="absolute inset-0 bg-gradient-to-b from-surface/55 via-surface/80 to-surface" />
+          </div>
+          <LobbyForm
+            account={account}
+            draft={draft}
+            onStart={start}
+            onAccountChange={applyAccount}
+            onOpenBoard={openBoard}
+            passportUnique={passportUnique}
+            onOpenPassport={openPassport}
+            busy={busy}
+            error={error}
+            config={config}
+          />
+        </>
       )}
 
       {phase === 'waiting' && (
