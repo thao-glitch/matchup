@@ -24,6 +24,10 @@ const APP = process.env.APP_URL || 'http://localhost:4000';
  */
 const API = process.env.API_URL || APP;
 /**
+ * The 1v1 video app lives at `/match` — the site root is now the social feed.
+ */
+const MATCH = `${APP}/match`;
+/**
  * `E2E_RELAY=1 npm run test:e2e` pins ICE to TURN (`?relay=1` in the app) and
  * additionally asserts that the media path really is `TURN relay` — the
  * end-to-end proof that the relay configured on the server works in a browser.
@@ -89,7 +93,7 @@ async function launchBrowser() {
 }
 
 async function join(page, profile) {
-  await page.goto(FORCE_RELAY ? `${APP}/?relay=1` : APP, { waitUntil: 'load', timeout: 20000 });
+  await page.goto(FORCE_RELAY ? `${MATCH}/?relay=1` : MATCH, { waitUntil: 'load', timeout: 20000 });
   await page.waitForSelector('#username', { timeout: 10000 });
   await page.type('#username', profile.username);
   await page.select('#age', String(profile.age));
@@ -504,7 +508,7 @@ async function main() {
     pageC.on('pageerror', (e) => consoleErrors.push('C pageerror: ' + e.message));
 
     const accName = `e2e_${Date.now().toString(36)}`;
-    await pageC.goto(FORCE_RELAY ? `${APP}/?relay=1` : APP, { waitUntil: 'load', timeout: 20000 });
+    await pageC.goto(FORCE_RELAY ? `${MATCH}/?relay=1` : MATCH, { waitUntil: 'load', timeout: 20000 });
     await pageC.waitForSelector('#username', { timeout: 10000 });
     await pageC.type('#username', accName);
     await pageC.type('#password', 'e2e-password-123');

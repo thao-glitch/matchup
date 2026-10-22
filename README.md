@@ -1,6 +1,8 @@
-# Matchup — 1v1 global video chat
+# Matchup — 1v1 global video chat + a creator platform
 
-A production-ready, peer-to-peer 1v1 video chat app. Two strangers are matched by
+A production-ready, peer-to-peer 1v1 video chat app — wrapped in a social
+platform where creators post content, charge for it in KES and get paid over
+M-PESA. Two strangers are matched by
 preference and connected directly over WebRTC — **video/audio never touch the
 server**; the server only introduces people and relays a few kilobytes of SDP/ICE.
 
@@ -22,8 +24,9 @@ server**; the server only introduces people and relays a few kilobytes of SDP/IC
 mute/camera → chat → Spark → rock-paper-scissors duel → hang-up → *Next* →
 re-match → share card → live country board → the Passport → accounts →
 telemetry), 46/46 when pinned through the TURN relay, 28/28 account checks,
-16/16 signaling checks, plus a live STUN/TURN `Allocate` verification. See
-[Testing](#7-testing).
+32/32 platform checks (commission split, M-PESA charges, wallets, payouts),
+26/26 dashboard checks, 16/16 signaling checks, plus a live STUN/TURN
+`Allocate` verification. See [Testing](#7-testing).
 
 **Accounts**: create a username + password once (scrypt-hashed in MariaDB), stay
 signed in on that device, come back later with everything prefilled — and change
@@ -33,6 +36,19 @@ signed in on that device, come back later with everything prefilled — and chan
 personal collection book — flags, counts, day-streaks and six achievements,
 teased live *while you queue*. Anonymous visitors collect on the device;
 signing up syncs the book across devices forever.
+
+**The social platform** (`docs/PLATFORM.md` is the full contract): a feed of
+photo/video posts — free or priced per view, in KES — plus Explore, a creator
+wallet with a configurable platform commission (default 15%), payout requests,
+paid group calls and 18+ conferences. Payments run on **M-PESA**: the buyer
+types their phone number, presses Pay and gets a Daraja STK PIN prompt; the
+charge row is both the receipt and the unlock, and the money lands in the
+creator's wallet already split (net to the creator, commission to the house).
+Until Safaricom credentials are entered in **/admin → Settings**, the app runs
+in *manual* mode: paybill + account number, and the owner approves each payment
+from the dashboard. `/admin` also owns commerce switches, commission rate,
+price caps, room moderation, the earnings ledger and payouts. The original 1v1
+video app lives at `/match` — the emphasised centre tab.
 
 **Guides**: [DEPLOY.md](DEPLOY.md) — run the whole app independently on free
 tiers (no card, no GitHub) · [ADS.md](ADS.md) — show ads *and* run promotion
@@ -50,28 +66,41 @@ matchup/
 │   ├── vercel.json                  # SPA rewrite + asset caching headers
 │   ├── tsconfig.json
 │   └── src/
-│       ├── App.tsx                  # 4-phase machine: lobby → waiting → chat → post-call
-│       ├── types.ts                 # shared domain types + signaling contract
-│       ├── index.css                # Tailwind v4 theme + component classes
+│       ├── main.tsx                  # mounts the Shell (or /admin) for every path
+│       ├── App.tsx                   # 4-phase machine: lobby → waiting → chat → post-call
+│       ├── types.ts                  # shared domain types + signaling contract
+│       ├── types/social.ts           # posts, charges, wallets, rooms
+│       ├── index.css                 # Tailwind v4 theme + component classes
+│       ├── shell/                    # the social app: nav, routing, page props
+│       ├── pages/                    # Feed, Explore, CreatePost, PostDetail, Live,
+│       │                             # Room (mesh group call), Wallet, Profile,
+│       │                             # Settings, Match (the original 1v1 app)
+│       ├── admin/                    # the /admin dashboard (tabs + API client)
 │       ├── components/
-│       │   ├── LobbyForm.tsx        # profile + preferences + account panel
-│       │   ├── WaitingScreen.tsx    # "Waiting…" + live presence counters
-│       │   ├── VideoChat.tsx        # call screen, controls, state HUD
-│       │   ├── PostCall.tsx         # after a call: Next / Stop matching / share card
-│       │   ├── EuropeBoard.tsx      # live online-by-country panel ("#europe")
-│       │   └── icons.tsx            # inline SVG icons (no icon dependency)
-│       ├── hooks/                   # (reserved)
+│       │   ├── LobbyForm.tsx         # profile + preferences + account panel
+│       │   ├── WaitingScreen.tsx     # "Waiting…" + live presence counters
+│       │   ├── VideoChat.tsx         # call screen, controls, state HUD
+│       │   ├── PostCall.tsx          # after a call: Next / Stop matching / share card
+│       │   ├── EuropeBoard.tsx       # live online-by-country panel ("#europe")
+│       │   ├── AuthDialog.tsx        # sign in / up, used by every gated page
+│       │   ├── PaySheet.tsx          # M-PESA: phone → Pay → STK PIN prompt
+│       │   └── icons.tsx             # inline SVG icons (no icon dependency)
+│       ├── hooks/                    # (reserved)
 │       └── lib/
-│           ├── signaling.ts         # typed Socket.io client + event contract
-│           ├── peer.ts              # RTCPeerConnection wrapper (the core)
-│           ├── iceServers.ts        # STUN/TURN config fetched from the server
-│           ├── auth.ts              # /api/auth client + bearer token in localStorage
-│           ├── draft.ts             # device-local "remember my form" fallback
-│           ├── api.ts               # GET /api/presence (the live board's data)
-│           ├── geo.ts               # country centroids → distance + Europe set
-│           ├── postcard.ts          # shareable "connection card" (canvas + share)
-│           ├── media.ts             # getUserMedia + error mapping
-│           └── countries.ts         # locale-aware country list
+│           ├── signaling.ts          # typed Socket.io client + event contract
+│           ├── rooms.ts              # room socket client (mesh group calls)
+│           ├── peer.ts               # RTCPeerConnection wrapper (the core)
+│           ├── iceServers.ts         # STUN/TURN config fetched from the server
+│           ├── auth.ts               # /api/auth client + bearer token in localStorage
+│           ├── social.ts             # /api/posts, /api/wallet, /api/rooms client
+│           ├── router.tsx            # pathname router (no dependency)
+│           ├── config.ts             # /api/config typed + defaults
+│           ├── draft.ts              # device-local "remember my form" fallback
+│           ├── api.ts                # GET /api/presence (the live board's data)
+│           ├── geo.ts                # country centroids → distance + Europe set
+│           ├── postcard.ts           # shareable "connection card" (canvas + share)
+│           ├── media.ts              # getUserMedia + error mapping
+│           └── countries.ts          # locale-aware country list
 │
 ├── server/                          # Signaling server (deployed to Render)
 │   ├── server.js                    # Express + Socket.io + HTTP + auth routes
@@ -79,13 +108,20 @@ matchup/
 │   ├── .env.example
 │   └── src/
 │       ├── protocol.js              # event names + payload docs (mirrors client)
-│       ├── matchmaking.js           # validation + symmetric match rule
-│       ├── matchmaker.js            # FIFO queue, rooms, signal relay, presence
-│       ├── accounts.js              # register/login/sessions (scrypt, bearer tokens)
-│       ├── iceConfig.js             # STUN + Twilio/coturn/static TURN resolution
-│       ├── telemetry.js             # per-call outcome aggregation (/api/stats)
-│       ├── mariaStore.js            # local MariaDB backend (profiles + accounts)
-│       └── store.js                 # MariaDB → MongoDB → in-memory facade
+│       ├── matchmaking.js            # validation + symmetric match rule
+│       ├── matchmaker.js             # FIFO queue, rooms, signal relay, presence
+│       ├── accounts.js               # register/login/sessions (scrypt, bearer tokens)
+│       ├── payments.js               # premium paybill intents (manual approval)
+│       ├── commerce.js               # posts, paywall, charges, commission split, wallets, rooms
+│       ├── socialStore.js            # social tables (posts, charges, wallets, rooms…)
+│       ├── mpesa.js                  # Daraja STK push + callback parsing
+│       ├── rooms.js                  # RoomHub — mesh signaling for group calls
+│       ├── settings.js               # payment/features/commerce/mpesa config + sanitizers
+│       ├── admin.js                  # every dashboard operation + audit trail
+│       ├── iceConfig.js              # STUN + Twilio/coturn/static TURN resolution
+│       ├── telemetry.js              # per-call outcome aggregation (/api/stats)
+│       ├── mariaStore.js             # local MariaDB backend (profiles, accounts, social tables)
+│       └── store.js                  # MariaDB → MongoDB → in-memory facade
 │
 ├── scripts/                         # operations + verification
 │   ├── mariadb-init.sql             # one-time: create the database + app user
@@ -94,9 +130,15 @@ matchup/
 │   ├── test-signaling.js            # 16 checks against the live server
 │   ├── test-db.js                   # is the app really linked to the database?
 │   ├── test-auth.js                 # 28 checks: the whole account lifecycle
+│   ├── test-admin.js                # 26 checks: the dashboard (login, ledger, bans)
+│   ├── test-platform.js             # 32 checks: posts, M-PESA charges, commission, wallets
+│   ├── test-ui.js                   # 15 checks: the social shell renders, tabs resolve
 │   ├── test-turn.js                 # real STUN Allocate against your TURN server
 │   ├── e2e.js                       # 43 checks (46 with E2E_RELAY=1): Chromium + WebRTC
 │   └── package.json                 # e2e needs puppeteer-core only
+│
+├── docs/
+│   └── PLATFORM.md                  # the social platform's full contract (API, DB, routes)
 │
 └── README.md
 ```
@@ -881,6 +923,26 @@ npm run test:db
 # silent re-login, profile + preferences saved (incl. rename), logout, session
 # revocation. Cleans up every row it created.
 npm run test:auth
+
+# Platform: 32 checks — commission split (15% of KES 400 → 340 to the
+# creator), the M-PESA charge lifecycle (open → approved → settled, wallet
+# credited once, double-approval is a no-op), paywall unlocking for the payer
+# only, payout requests reserving the balance, post hide/restore, rooms over
+# signaling, commerce + mpesa settings and the audit trail. Needs the server
+# running against MariaDB; cleans up every row it created.
+npm run test:platform
+
+# Admin dashboard: 26 checks — login, overview, the payment ledger
+# (one reference → approve → premium granted once), ban/unban killing live
+# sessions, settings round-trip, the audit trail.
+#   ADMIN_USERNAME=… ADMIN_PASSWORD=… npm run test:admin
+npm run test:admin
+
+# UI smoke: 15 checks — every social tab renders signed-in with no runtime
+# errors, the tab bar keeps its routes (incl. the 1v1 `/match`), the feed
+# reads signed out and a protected page asks for credentials. Needs the
+# system Chromium.
+npm run test:ui
 
 # TURN: real STUN Allocate + CreatePermission against the configured relay
 # (exit 2 = TURN not configured — see README → "Deploying TURN")
