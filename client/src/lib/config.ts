@@ -8,6 +8,9 @@
  *     (ads, sign-ups, payments) plus the maintenance kill switch.
  *   • `payment`  — the paybill block: bank, number, unique account-number
  *     format, price, premium length and the wording of the instructions.
+ *   • `commerce` — the social platform: which tabs exist, the commission the
+ *     house keeps on a sale, and whether payments run as an STK push or a
+ *     manual paybill approval.
  *
  * The endpoint is public on purpose: none of it is a secret (it is rendered
  * on screen for everyone), and caching it in this module keeps the lobby from
@@ -15,6 +18,7 @@
  * defaults with payments off — the app must never brick itself over config.
  */
 import { SIGNALING_URL } from './iceServers';
+import type { CommerceConfig } from '../types/social';
 
 export interface PaymentConfig {
   /** False when payments are switched off OR the premium feature is off. */
@@ -38,6 +42,8 @@ export interface PublicConfig {
     maintenance: boolean;
   };
   payment: PaymentConfig;
+  /** The social platform's switches and economics (posts, rooms, commission). */
+  commerce: CommerceConfig;
 }
 
 const BASE = `${SIGNALING_URL.replace(/\/$/, '')}/api/config`;
@@ -57,6 +63,18 @@ export const DEFAULT_CONFIG: PublicConfig = {
     instructions: '',
     supportContact: '',
   },
+  commerce: {
+    enabled: true,
+    social: true,
+    groups: true,
+    adult: true,
+    commissionRate: 15,
+    minPrice: 5,
+    maxPrice: 15000,
+    currency: 'KES',
+    payMode: 'manual',
+    paybill: '',
+  },
 };
 
 let cached: PublicConfig | null = null;
@@ -67,6 +85,7 @@ function normalize(data: Partial<PublicConfig> | null): PublicConfig {
   return {
     features: { ...DEFAULT_CONFIG.features, ...(src.features ?? {}) },
     payment: { ...DEFAULT_CONFIG.payment, ...(src.payment ?? {}) },
+    commerce: { ...DEFAULT_CONFIG.commerce, ...(src.commerce ?? {}) },
   };
 }
 

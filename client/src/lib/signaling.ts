@@ -8,6 +8,7 @@ import type {
   SignalMessage,
   WaitingStatus,
 } from '../types';
+import type { Room, RoomPeer } from '../types/social';
 import { SIGNALING_URL } from './iceServers';
 
 /**
@@ -31,6 +32,22 @@ export interface ServerToClientEvents {
   presence: (status: WaitingStatus) => void;
   /** Validation / rate-limit / internal errors that are safe to show. */
   'server:error': (info: { code: string; message: string }) => void;
+  /** Group room: the room you created is open (you are already inside it). */
+  'room:created': (msg: { room: Room }) => void;
+  /** Group room: you are in — `peers` is who to dial (see `RoomPeer`). */
+  'room:joined': (msg: { room: Room; self: RoomPeer; peers: RoomPeer[] }) => void;
+  /** Group room: SDP/ICE from ONE other participant (mesh relay). */
+  'room:signal': (msg: {
+    slug: string;
+    from: number;
+    username?: string;
+    kind: 'offer' | 'answer' | 'candidate';
+    payload: unknown;
+  }) => void;
+  /** Group room: the roster changed — sync your peer connections to it. */
+  'room:state': (msg: { slug: string; participants: RoomPeer[]; count: number }) => void;
+  /** Group room: the host (or the dashboard) closed it for everyone. */
+  'room:closed': (msg: { slug: string; byAdmin?: boolean }) => void;
 }
 
 export interface ClientToServerEvents {
@@ -41,6 +58,24 @@ export interface ClientToServerEvents {
   'call:end': () => void;
   /** Telemetry: how the call resolved (path/RTT/duration). See `CallReport`. */
   'call:report': (report: CallReport) => void;
+  /** Group rooms — `token` authenticates the socket (rooms are never anonymous). */
+  'room:create': (msg: {
+    token: string;
+    title: string;
+    price: number;
+    isAdult: boolean;
+    max: number;
+    kind: 'group' | 'conference';
+  }) => void;
+  'room:enter': (msg: { token: string; slug: string }) => void;
+  'room:signal': (msg: {
+    slug: string;
+    to: number;
+    kind: 'offer' | 'answer' | 'candidate';
+    payload: unknown;
+  }) => void;
+  'room:leave': (msg: { slug: string }) => void;
+  'room:end': (msg: { token: string; slug: string }) => void;
 }
 
 export type AppSocket = Socket<ServerToClientEvents, ClientToServerEvents>;

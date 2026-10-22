@@ -151,8 +151,135 @@ export interface PaymentRow {
   accountExists: boolean;
 }
 
+// ── Social platform (posts, charges, rooms, wallets) ─────────────────────────
+
+/** A creator's post as moderation sees it — no media URLs, just the record. */
+export interface AdminPost {
+  id: number;
+  creatorId: number;
+  creatorName: string;
+  creatorCountry: string;
+  type: 'image' | 'video' | 'link' | 'text';
+  caption: string;
+  linkUrl: string | null;
+  price: number;
+  currency: string;
+  isAdult: boolean;
+  status: 'active' | 'hidden' | 'removed';
+  views: number;
+  likes: number;
+  comments: number;
+  purchases: number;
+  createdAt: string;
+}
+
+/** One paid-content transaction: gross, the house cut, and the creator's net. */
+export interface AdminCharge {
+  id: number;
+  purpose: 'post' | 'room';
+  refId: number;
+  buyerId: number;
+  buyerUsername: string;
+  payeeId: number;
+  payeeUsername: string;
+  phone: string;
+  amount: number;
+  currency: string;
+  commission: number;
+  net: number;
+  status: 'pending' | 'paid' | 'failed' | 'expired';
+  mpesaRef: string | null;
+  checkoutRequestId: string | null;
+  error: string | null;
+  note: string | null;
+  createdAt: string;
+  paidAt: string | null;
+}
+
+/** Group call / conference room with its live head-count. */
+export interface AdminRoom {
+  id: number;
+  slug: string;
+  title: string;
+  kind: 'group' | 'conference';
+  hostId: number;
+  hostName: string;
+  price: number;
+  currency: string;
+  isAdult: boolean;
+  maxParticipants: number;
+  status: 'live' | 'ended';
+  participants: number;
+  createdAt: string;
+  endedAt: string | null;
+}
+
+export interface WalletRow {
+  accountId: number;
+  username: string;
+  balance: number;
+  lifetimeIn: number;
+  lifetimeOut: number;
+  updatedAt: string | null;
+}
+
+export interface WalletEntryRow {
+  id: number;
+  accountId: number;
+  amount: number;
+  kind: 'sale' | 'adjustment' | 'withdrawal';
+  status: 'posted' | 'pending' | 'approved' | 'rejected';
+  chargeId: number | null;
+  memo: string | null;
+  username: string;
+  createdAt: string;
+}
+
+export interface EarningsData {
+  count: number;
+  gross: number;
+  commission: number;
+  net: number;
+  pending: number;
+  paid: number;
+  failed: number;
+  expired: number;
+  byDay: { day: string; count: number; gross: number; commission: number }[];
+  wallets: { held: number; earned: number; paidOut: number; wallets: number; pendingPayouts: number; pendingAmount: number };
+  withdrawals: WalletEntryRow[];
+}
+
+// ── Settings (the four sections of PUT /api/admin/settings) ──────────────────
+
+export interface CommerceSettings {
+  enabled: boolean;
+  social: boolean;
+  groups: boolean;
+  adult: boolean;
+  commissionRate: number;
+  minPrice: number;
+  maxPrice: number;
+  currency: string;
+}
+
+/** Secrets arrive masked as `••••••••`; writing a masked value back keeps
+ *  the stored one, so an untouched form round-trips safely. */
+export interface MpesaSettings {
+  enabled: boolean;
+  mode: 'stk' | 'manual';
+  consumerKey: string;
+  consumerSecret: string;
+  shortcode: string;
+  passkey: string;
+  baseUrl: string;
+  callbackUrl: string;
+  paybill: string;
+  accountFormat: string;
+  description: string;
+}
+
 export interface SettingsBundle {
-  settings: { payment: PaymentSettings; features: FeatureFlags };
+  settings: { payment: PaymentSettings; features: FeatureFlags; commerce: CommerceSettings; mpesa: MpesaSettings };
 }
 
 export interface AuditItem {
