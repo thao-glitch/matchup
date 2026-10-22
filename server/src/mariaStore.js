@@ -217,6 +217,147 @@ const SCHEMA_AUDIT = `
 `;
 
 /**
+ * The social platform: posts, the payment instrument behind every paid view,
+ * the creator wallets and the group rooms.
+ *
+ * `charges` is deliberately the ONLY payment table for new money — a paid row
+ * is both the receipt and the entitlement (purpose + ref_id points at the post
+ * or the room it unlocked). Like `payments`, it carries no account FK: money
+ * outlives users, and the username snapshots make that safe.
+ *
+ * `wallets.balance` is only ever moved with `UPDATE … SET balance = balance ± ?`
+ * inside `socialStore`, so two simultaneous sales can never corrupt it.
+ */
+const SCHEMA_POSTS = `
+  CREATE TABLE IF NOT EXISTS posts (
+    id           INT UNSIGNED     NOT NULL AUTO_INCREMENT,
+    account_id   INT UNSIGNED     NOT NULL,
+    username     VARCHAR(24)      NOT NULL,
+    type         VARCHAR(10)      NOT NULL DEFAULT 'text',
+    caption      TEXT             NOT NULL,
+    media_key    VARCHAR(80)      NULL DEFAULT NULL,
+    link_url     VARCHAR(500)     NULL DEFAULT NULL,
+    price        DECIMAL(10,2)    NOT NULL DEFAULT 0,
+    currency     CHAR(3)          NOT NULL DEFAULT 'KES',
+    is_adult     TINYINT(1)       NOT NULL DEFAULT 0,
+    status       VARCHAR(12)      NOT NULL DEFAULT 'active',
+    views        INT UNSIGNED     NOT NULL DEFAULT 0,
+    likes_n      INT UNSIGNED     NOT NULL DEFAULT 0,
+    comments_n   INT UNSIGNED     NOT NULL DEFAULT 0,
+    purchases    INT UNSIGNED     NOT NULL DEFAULT 0,
+    created_at   TIMESTAMP        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    KEY idx_posts_feed (status, created_at),
+    KEY idx_posts_creator (account_id, created_at)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+`;
+
+const SCHEMA_POST_LIKES = `
+  CREATE TABLE IF NOT EXISTS post_likes (
+    post_id     INT UNSIGNED NOT NULL,
+    account_id  INT UNSIGNED NOT NULL,
+    created_at  TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (post_id, account_id),
+    KEY idx_post_likes_account (account_id)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+`;
+
+const SCHEMA_POST_COMMENTS = `
+  CREATE TABLE IF NOT EXISTS post_comments (
+    id          INT UNSIGNED NOT NULL AUTO_INCREMENT,
+    post_id     INT UNSIGNED NOT NULL,
+    account_id  INT UNSIGNED NOT NULL,
+    username    VARCHAR(24)  NOT NULL,
+    body        VARCHAR(500) NOT NULL,
+    status      VARCHAR(12)  NOT NULL DEFAULT 'active',
+    created_at  TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    KEY idx_comments_post (post_id, created_at)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+`;
+
+const SCHEMA_CHARGES = `
+  CREATE TABLE IF NOT EXISTS charges (
+    id                  INT UNSIGNED     NOT NULL AUTO_INCREMENT,
+    purpose             VARCHAR(10)      NOT NULL,
+    ref_id              INT UNSIGNED     NOT NULL,
+    buyer_account_id    INT UNSIGNED     NOT NULL,
+    buyer_username      VARCHAR(24)      NOT NULL,
+    payee_account_id    INT UNSIGNED     NOT NULL,
+    payee_username      VARCHAR(24)      NOT NULL,
+    phone               VARCHAR(16)      NOT NULL DEFAULT '',
+    amount              DECIMAL(10,2)    NOT NULL DEFAULT 0,
+    currency            CHAR(3)          NOT NULL DEFAULT 'KES',
+    commission          DECIMAL(10,2)    NOT NULL DEFAULT 0,
+    net                 DECIMAL(10,2)    NOT NULL DEFAULT 0,
+    status              VARCHAR(12)      NOT NULL DEFAULT 'pending',
+    checkout_request_id VARCHAR(64)      NULL DEFAULT NULL,
+    merchant_request_id VARCHAR(64)      NULL DEFAULT NULL,
+    mpesa_receipt       VARCHAR(32)      NULL DEFAULT NULL,
+    result_code         INT              NULL DEFAULT NULL,
+    result_desc         VARCHAR(255)     NULL DEFAULT NULL,
+    note                VARCHAR(255)     NULL DEFAULT NULL,
+    created_at          TIMESTAMP        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    paid_at             DATETIME         NULL DEFAULT NULL,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_charges_checkout (checkout_request_id),
+    KEY idx_charges_status (status, created_at),
+    KEY idx_charges_ref (purpose, ref_id, status),
+    KEY idx_charges_buyer (buyer_account_id, purpose, ref_id),
+    KEY idx_charges_payee (payee_account_id, created_at)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+`;
+
+const SCHEMA_WALLETS = `
+  CREATE TABLE IF NOT EXISTS wallets (
+    account_id    INT UNSIGNED   NOT NULL,
+    balance       DECIMAL(12,2)  NOT NULL DEFAULT 0,
+    lifetime_in   DECIMAL(12,2)  NOT NULL DEFAULT 0,
+    lifetime_out  DECIMAL(12,2)  NOT NULL DEFAULT 0,
+    updated_at    TIMESTAMP      NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (account_id)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+`;
+
+const SCHEMA_WALLET_ENTRIES = `
+  CREATE TABLE IF NOT EXISTS wallet_entries (
+    id          INT UNSIGNED     NOT NULL AUTO_INCREMENT,
+    account_id  INT UNSIGNED     NOT NULL,
+    amount      DECIMAL(12,2)    NOT NULL,
+    kind        VARCHAR(16)      NOT NULL,
+    status      VARCHAR(16)      NOT NULL DEFAULT 'posted',
+    charge_id   INT UNSIGNED     NULL DEFAULT NULL,
+    memo        VARCHAR(160)     NULL DEFAULT NULL,
+    created_at  TIMESTAMP        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    KEY idx_wallet_entries_account (account_id, created_at),
+    KEY idx_wallet_entries_status (status, created_at)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+`;
+
+const SCHEMA_ROOMS = `
+  CREATE TABLE IF NOT EXISTS rooms (
+    id              INT UNSIGNED     NOT NULL AUTO_INCREMENT,
+    slug            VARCHAR(24)      NOT NULL,
+    title           VARCHAR(80)      NOT NULL,
+    kind            VARCHAR(12)      NOT NULL DEFAULT 'group',
+    host_account_id INT UNSIGNED     NOT NULL,
+    host_username   VARCHAR(24)      NOT NULL,
+    price           DECIMAL(10,2)    NOT NULL DEFAULT 0,
+    currency        CHAR(3)          NOT NULL DEFAULT 'KES',
+    is_adult        TINYINT(1)       NOT NULL DEFAULT 0,
+    max_participants TINYINT UNSIGNED NOT NULL DEFAULT 6,
+    status          VARCHAR(12)      NOT NULL DEFAULT 'live',
+    created_at      TIMESTAMP        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    ended_at        DATETIME         NULL DEFAULT NULL,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_rooms_slug (slug),
+    KEY idx_rooms_status (status, created_at)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+`;
+
+/**
  * Columns added to the pre-existing `accounts` table.
  *
  * Written as information_schema checks instead of `ADD COLUMN IF NOT EXISTS`
@@ -328,6 +469,14 @@ async function applySchema() {
   await pool.query(SCHEMA_PAYMENTS); // deliberately no FK — money outlives users
   await pool.query(SCHEMA_SETTINGS);
   await pool.query(SCHEMA_AUDIT);
+  // Social platform — after `accounts` (no FKs, but ordering keeps boot logs sane).
+  await pool.query(SCHEMA_POSTS);
+  await pool.query(SCHEMA_POST_LIKES);
+  await pool.query(SCHEMA_POST_COMMENTS);
+  await pool.query(SCHEMA_CHARGES);
+  await pool.query(SCHEMA_WALLETS);
+  await pool.query(SCHEMA_WALLET_ENTRIES);
+  await pool.query(SCHEMA_ROOMS);
   await ensureAccountColumns();
   await pool.query(PURGE); // one cleanup per boot too
   await pool.query(PURGE_SESSIONS).catch(() => undefined);
@@ -1228,12 +1377,33 @@ function safeParse(text) {
   }
 }
 
+/**
+ * Run one statement on the shared pool.
+ *
+ * The social layer (`socialStore.js`) owns its own tables but must reuse the
+ * exact same connection pool — a second pool would double the connection count
+ * on a `connectionLimit: 5` database for no benefit. Returns the raw result:
+ * rows for SELECTs, the OkPacket (with `insertId` / `affectedRows`) otherwise.
+ *
+ * @throws `err.code === 'DB_UNAVAILABLE'` when no database is configured.
+ */
+async function query(sql, params = []) {
+  if (!pool) {
+    const err = new Error('database not ready');
+    err.code = 'DB_UNAVAILABLE';
+    throw err;
+  }
+  const [result] = await pool.query(sql, params);
+  return result;
+}
+
 module.exports = {
   configured,
   init,
   save,
   stats,
   close,
+  query,
   loadPassport,
   savePassport,
   createAccount,

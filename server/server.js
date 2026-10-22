@@ -11,6 +11,7 @@ const { Server } = require('socket.io');
 
 const { getIceConfig, describeIce, isLocalIp } = require('./src/iceConfig');
 const { Matchmaker } = require('./src/matchmaker');
+const { RoomHub } = require('./src/rooms');
 const telemetry = require('./src/telemetry');
 const store = require('./src/store');
 const accounts = require('./src/accounts');
@@ -18,6 +19,9 @@ const passport = require('./src/passport');
 const settings = require('./src/settings');
 const admin = require('./src/admin');
 const payments = require('./src/payments');
+const commerce = require('./src/commerce');
+const mpesa = require('./src/mpesa');
+const socialStore = require('./src/socialStore');
 
 const PORT = Number(process.env.PORT) || 4000;
 const HOST = process.env.HOST || '0.0.0.0';
@@ -67,6 +71,8 @@ const io = new Server(server, {
 
 /** @type {Matchmaker | null} */
 let matchmaker = null;
+/** @type {RoomHub | null} — group calls + conferences (attached per socket). */
+let roomHub = null;
 
 // ── HTTP routes ──────────────────────────────────────────────────────────────
 
@@ -83,6 +89,8 @@ app.get('/health', (req, res) => {
     payments: payments.backend(),
     // Which switch positions the lobby is currently rendering.
     features: settings.get().features,
+    // Group calls / conferences that are live right now.
+    rooms: roomHub ? roomHub.stats() : { rooms: 0, participants: 0 },
     // Operational glance: `turnConfigured: false` means strict-NAT users fail.
     ice: describeIce(),
   });
@@ -307,6 +315,314 @@ app.get('/api/payments/mine', sessionLimiter, async (req, res) => {
   }
 });
 
+// ── Social platform: posts, charges, wallet, rooms ──────────────────────────
+
+/**
+ * Reading the feed is the most-hit surface in the app — it gets its own,
+ * generous bucket so scrolling can never be throttled by someone else's
+ * page refreshes on the same IP.
+ */
+const readLimiter = rateLimit({ windowMs: 60_000, max: 240 });
+/** Publishing, commenting, uploading, paying: 30/min/IP is a real human. */
+const contentLimiter = rateLimit({ windowMs: 60_000, max: 30 });
+
+/** Bearer → account, or `null` (the feed is readable signed out). */
+const optionalUser = (req) => accounts.authenticate(bearerOf(req));
+
+/** Bearer → account, or a 401 through the usual envelope. */
+async function requireUser(req, res) {
+  const user = await accounts.authenticate(bearerOf(req));
+  if (!user) {
+    res
+      .status(401)
+      .json({ error: { code: 'unauthorized', message: 'Please sign in to continue.' } });
+    return null;
+  }
+  return user;
+}
+
+const intQuery = (value, fallback) => {
+  const n = Number.parseInt(String(value ?? ''), 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+};
+
+// ── Posts ────────────────────────────────────────────────────────────────────
+
+/** GET /api/posts?page=&size=&q=&adult= → one page of the feed. */
+app.get('/api/posts', readLimiter, async (req, res) => {
+  try {
+    const user = await optionalUser(req);
+    const { page, size, q, adult } = req.query || {};
+    res.set('Cache-Control', 'no-store').json(
+      await commerce.feed(user, {
+        page: intQuery(page, 1),
+        size: intQuery(size, 20),
+        q: typeof q === 'string' ? q.slice(0, 80) : '',
+        adult: adult === '1' || adult === 'true',
+      }),
+    );
+  } catch (err) {
+    sendAuthError(res, err);
+  }
+});
+
+/** GET /api/posts/mine (Bearer) → the creator's own rows, hidden ones included. */
+app.get('/api/posts/mine', readLimiter, async (req, res) => {
+  try {
+    const user = await requireUser(req, res);
+    if (!user) return undefined;
+    const { page, size } = req.query || {};
+    res.set('Cache-Control', 'no-store').json(
+      await commerce.mine(user, { page: intQuery(page, 1), size: intQuery(size, 20) }),
+    );
+  } catch (err) {
+    sendAuthError(res, err);
+  }
+  return undefined;
+});
+
+/** GET /api/posts/:id → one post as the viewer may see it (counts a view). */
+app.get('/api/posts/:id', readLimiter, async (req, res) => {
+  try {
+    const user = await optionalUser(req);
+    res.set('Cache-Control', 'no-store').json(await commerce.postDetail(user, Number(req.params.id)));
+  } catch (err) {
+    sendAuthError(res, err);
+  }
+});
+
+/**
+ * GET /api/posts/:id/media → the file behind a post.
+ * This route IS the paywall: uploads are not served statically, so a viewer
+ * without a paid charge gets 402 here and nowhere else to try.
+ */
+app.get('/api/posts/:id/media', readLimiter, async (req, res) => {
+  try {
+    const user = await optionalUser(req);
+    await commerce.readPostMedia(user, Number(req.params.id), res);
+  } catch (err) {
+    sendAuthError(res, err);
+  }
+});
+
+/** POST /api/posts (Bearer) { caption, price, isAdult, type, mediaKey?, linkUrl? } */
+app.post('/api/posts', contentLimiter, async (req, res) => {
+  try {
+    const user = await requireUser(req, res);
+    if (!user) return undefined;
+    res.status(201).json({ post: await commerce.createPost(user, req.body || {}) });
+  } catch (err) {
+    sendAuthError(res, err);
+  }
+  return undefined;
+});
+
+/** DELETE /api/posts/:id (Bearer) → 204 — the creator's own post only. */
+app.delete('/api/posts/:id', contentLimiter, async (req, res) => {
+  try {
+    const user = await requireUser(req, res);
+    if (!user) return undefined;
+    await commerce.removePost(user, Number(req.params.id));
+    res.status(204).end();
+  } catch (err) {
+    sendAuthError(res, err);
+  }
+  return undefined;
+});
+
+/** POST /api/posts/:id/like (Bearer) { liked } → { liked, likes } */
+app.post('/api/posts/:id/like', contentLimiter, async (req, res) => {
+  try {
+    const user = await requireUser(req, res);
+    if (!user) return undefined;
+    res.json(await commerce.like(user, Number(req.params.id), (req.body || {}).liked));
+  } catch (err) {
+    sendAuthError(res, err);
+  }
+  return undefined;
+});
+
+/** GET /api/posts/:id/comments → { items } */
+app.get('/api/posts/:id/comments', readLimiter, async (req, res) => {
+  try {
+    const user = await optionalUser(req);
+    res.set('Cache-Control', 'no-store').json(await commerce.listComments(user, Number(req.params.id)));
+  } catch (err) {
+    sendAuthError(res, err);
+  }
+});
+
+/** POST /api/posts/:id/comments (Bearer) { body } → 201 { comment } */
+app.post('/api/posts/:id/comments', contentLimiter, async (req, res) => {
+  try {
+    const user = await requireUser(req, res);
+    if (!user) return undefined;
+    res.status(201).json(await commerce.addComment(user, Number(req.params.id), (req.body || {}).body));
+  } catch (err) {
+    sendAuthError(res, err);
+  }
+  return undefined;
+});
+
+/**
+ * POST /api/media (Bearer) raw bytes → 201 { key }.
+ * `express.raw` with a real body limit — this is the one route where the
+ * payload is not JSON, so the global 32 kb JSON parser never sees it.
+ */
+app.post(
+  '/api/media',
+  contentLimiter,
+  express.raw({ type: () => true, limit: '32mb' }),
+  async (req, res) => {
+    try {
+      const user = await requireUser(req, res);
+      if (!user) return undefined;
+      const key = await commerce.saveUpload({
+        buffer: req.body,
+        contentType: req.headers['content-type'],
+      });
+      res.status(201).json({ key });
+    } catch (err) {
+      sendAuthError(res, err);
+    }
+    return undefined;
+  },
+);
+
+// ── Charges (M-PESA STK push) ────────────────────────────────────────────────
+
+/**
+ * POST /api/charges (Bearer) { purpose, refId, phone } → 201 { charge }
+ * Opens the row, fires the STK push, and the phone prompts for the PIN.
+ */
+app.post('/api/charges', contentLimiter, async (req, res) => {
+  try {
+    const user = await requireUser(req, res);
+    if (!user) return undefined;
+    res.status(201).json(await commerce.createCharge(user, req.body || {}));
+  } catch (err) {
+    sendAuthError(res, err);
+  }
+  return undefined;
+});
+
+/** GET /api/charges/:id (Bearer) → poll until pending becomes paid/failed. */
+app.get('/api/charges/:id', readLimiter, async (req, res) => {
+  try {
+    const user = await requireUser(req, res);
+    if (!user) return undefined;
+    res.set('Cache-Control', 'no-store').json(await commerce.chargeStatus(user, Number(req.params.id)));
+  } catch (err) {
+    sendAuthError(res, err);
+  }
+  return undefined;
+});
+
+/**
+ * POST /api/mpesa/callback — Daraja's result notification.
+ *
+ * Public on purpose (Safaricom cannot send a bearer token), so it validates
+ * by `CheckoutRequestID` alone: an unknown id is ACKed rather than retried
+ * forever, and settlement itself is idempotent (the `pending → paid` UPDATE
+ * decides who credits the wallet — this endpoint, a status poll, or the
+ * owner approving manually — exactly once).
+ */
+app.post('/api/mpesa/callback', express.json({ limit: '64kb' }), async (req, res) => {
+  const parsed = mpesa.parseCallback(req.body);
+  if (!parsed) return res.status(200).json(mpesa.NACK);
+  try {
+    const charge = await socialStore.getChargeByCheckout(parsed.checkoutRequestId);
+    if (!charge) {
+      console.warn(`[mpesa] callback for unknown checkout ${parsed.checkoutRequestId}`);
+      return res.status(200).json(mpesa.ACK);
+    }
+    if (parsed.resultCode === 0) {
+      const settled = await commerce.settle(charge.id, {
+        receipt: parsed.receipt,
+        resultCode: 0,
+        description: parsed.description,
+      });
+      console.info(
+        `[mpesa] ${settled ? 'settled' : 'already settled'} charge #${charge.id} ` +
+          `KES ${charge.amount} ${parsed.receipt || ''} (${charge.purpose} ${charge.refId})`,
+      );
+    } else {
+      await commerce.fail(charge.id, {
+        resultCode: parsed.resultCode,
+        description: parsed.description,
+      });
+      console.info(
+        `[mpesa] charge #${charge.id} failed: ${parsed.resultCode} ${parsed.description}`,
+      );
+    }
+    return res.status(200).json(mpesa.ACK);
+  } catch (err) {
+    console.error('[mpesa] callback failed:', err.message);
+    // 200 anyway: Daraja retries on non-2xx, and a retried settle is safe.
+    return res.status(200).json(mpesa.ACK);
+  }
+});
+
+// ── Wallet + rooms (public read) ─────────────────────────────────────────────
+
+/** GET /api/wallet (Bearer) → { wallet, entries } — the creator's money. */
+app.get('/api/wallet', readLimiter, async (req, res) => {
+  try {
+    const user = await requireUser(req, res);
+    if (!user) return undefined;
+    res.set('Cache-Control', 'no-store').json(await commerce.wallet(user));
+  } catch (err) {
+    sendAuthError(res, err);
+  }
+  return undefined;
+});
+
+/** POST /api/wallet/withdraw (Bearer) { phone, amount } → reserves the balance. */
+app.post('/api/wallet/withdraw', contentLimiter, async (req, res) => {
+  try {
+    const user = await requireUser(req, res);
+    if (!user) return undefined;
+    res.status(201).json(await commerce.withdraw(user, req.body || {}));
+  } catch (err) {
+    sendAuthError(res, err);
+  }
+  return undefined;
+});
+
+/** GET /api/rooms?kind=&adult= → live group calls + conferences. */
+app.get('/api/rooms', readLimiter, async (req, res) => {
+  try {
+    const user = await optionalUser(req);
+    const { kind, adult } = req.query || {};
+    const result = await commerce.rooms(user, {
+      kind: typeof kind === 'string' ? kind : '',
+      adult: adult === '1' || adult === 'true',
+    });
+    // Live head-count comes from the socket hub, not the database.
+    res.set('Cache-Control', 'no-store').json({
+      items: roomHub ? roomHub.withCounts(result.items) : result.items.map((r) => ({ ...r, participants: 0 })),
+    });
+  } catch (err) {
+    sendAuthError(res, err);
+  }
+});
+
+/** GET /api/rooms/:slug → one room plus this viewer's entry rights. */
+app.get('/api/rooms/:slug', readLimiter, async (req, res) => {
+  try {
+    const user = await optionalUser(req);
+    const data = await commerce.roomInfo(user, req.params.slug);
+    res.set('Cache-Control', 'no-store').json({
+      ...data,
+      room: roomHub
+        ? { ...data.room, participants: roomHub.liveCount(data.room.slug) }
+        : { ...data.room, participants: 0 },
+    });
+  } catch (err) {
+    sendAuthError(res, err);
+  }
+});
+
 // ── Admin dashboard ──────────────────────────────────────────────────────────
 
 /**
@@ -364,7 +680,7 @@ app.get('/api/admin/me', adminLimiter, adminRoute(async (identity) => ({ admin: 
 /** GET /api/admin/overview → accounts, live queue, calls, ledger, settings. */
 app.get('/api/admin/overview', adminLimiter, adminRoute(async (identity, req, res) => {
   res.set('Cache-Control', 'no-store');
-  return res.json(await admin.overview(matchmaker));
+  return res.json(await admin.overview(matchmaker, roomHub));
 }));
 
 /** GET /api/admin/users?q=&filter=&page=&size= → { items, total, page, size } */
@@ -416,6 +732,110 @@ app.get('/api/admin/audit', adminLimiter, adminRoute(async (identity, req, res) 
   res.json({ items: await admin.listAudit(Number((req.query || {}).limit) || 100) });
 }));
 
+// ── Social platform dashboard ────────────────────────────────────────────────
+
+/** GET /api/admin/posts?status=&q=&page=&size= → the moderation queue. */
+app.get('/api/admin/posts', adminLimiter, adminRoute(async (identity, req, res) => {
+  const { status, q, page, size, creatorId } = req.query || {};
+  res.set('Cache-Control', 'no-store');
+  const result = await admin.listPosts({
+    status: typeof status === 'string' ? status : 'all',
+    q: typeof q === 'string' ? q.slice(0, 80) : '',
+    creatorId: creatorId ? Number(creatorId) : null,
+    page: Number(page),
+    size: Number(size),
+  });
+  res.json({ ...result, page: Math.max(1, Number(page) || 1), size: Math.min(100, Number(size) || 25) });
+}));
+
+/** PATCH /api/admin/posts/:id { status?, note?, deleteComments? } → { post } */
+app.patch('/api/admin/posts/:id', adminLimiter, adminRoute(async (identity, req, res) => {
+  res.json(await admin.moderatePost(identity, Number(req.params.id), req.body || {}));
+}));
+
+/** GET /api/admin/charges?status=&purpose=&q=&page=&size= → the new ledger. */
+app.get('/api/admin/charges', adminLimiter, adminRoute(async (identity, req, res) => {
+  const { status, purpose, q, page, size } = req.query || {};
+  res.set('Cache-Control', 'no-store');
+  const result = await admin.listCharges({
+    status: typeof status === 'string' ? status : '',
+    purpose: typeof purpose === 'string' ? purpose : '',
+    q: typeof q === 'string' ? q.slice(0, 80) : '',
+    page: Number(page),
+    size: Number(size),
+  });
+  res.json({ ...result, page: Math.max(1, Number(page) || 1), size: Math.min(100, Number(size) || 25) });
+}));
+
+/** PATCH /api/admin/charges/:id { status: 'paid'|'failed', note? } → { charge } */
+app.patch('/api/admin/charges/:id', adminLimiter, adminRoute(async (identity, req, res) => {
+  res.json({ charge: await admin.reviewCharge(identity, Number(req.params.id), req.body || {}) });
+}));
+
+/** GET /api/admin/rooms?status=&page=&size= → every room, live head-counts in. */
+app.get('/api/admin/rooms', adminLimiter, adminRoute(async (identity, req, res) => {
+  const { status, kind, page, size } = req.query || {};
+  res.set('Cache-Control', 'no-store');
+  const result = await admin.listRooms({
+    status: typeof status === 'string' ? status : 'live',
+    kind: typeof kind === 'string' ? kind : '',
+    page: Number(page),
+    size: Number(size),
+  });
+  res.json({
+    ...result,
+    items: roomHub ? roomHub.withCounts(result.items) : result.items.map((r) => ({ ...r, participants: 0 })),
+    page: Math.max(1, Number(page) || 1),
+    size: Math.min(100, Number(size) || 25),
+  });
+}));
+
+/** PATCH /api/admin/rooms/:id { status: 'live'|'ended' } → closes it live. */
+app.patch('/api/admin/rooms/:id', adminLimiter, adminRoute(async (identity, req, res) => {
+  res.json(await admin.updateRoom(identity, Number(req.params.id), req.body || {}, roomHub));
+}));
+
+/** GET /api/admin/earnings?days= → gross, the house cut, wallets, payouts. */
+app.get('/api/admin/earnings', adminLimiter, adminRoute(async (identity, req, res) => {
+  res.set('Cache-Control', 'no-store');
+  return res.json(await admin.earnings({ days: Number((req.query || {}).days) || 30 }));
+}));
+
+/** GET /api/admin/wallets?page=&size=&q= → every creator balance. */
+app.get('/api/admin/wallets', adminLimiter, adminRoute(async (identity, req, res) => {
+  const { q, page, size } = req.query || {};
+  res.set('Cache-Control', 'no-store');
+  const result = await admin.listWallets({
+    q: typeof q === 'string' ? q.slice(0, 80) : '',
+    page: Number(page),
+    size: Number(size),
+  });
+  res.json({ ...result, page: Math.max(1, Number(page) || 1), size: Math.min(100, Number(size) || 25) });
+}));
+
+/** POST /api/admin/wallets/adjust { accountId, amount, memo } → { wallet } */
+app.post('/api/admin/wallets/adjust', adminLimiter, adminRoute(async (identity, req, res) => {
+  const { accountId, amount, memo } = req.body || {};
+  res.json(await admin.adjustWallet(identity, Number(accountId), Number(amount), memo));
+}));
+
+/** PATCH /api/admin/wallet-entries/:id { status } → approve/reject a payout. */
+app.patch('/api/admin/wallet-entries/:id', adminLimiter, adminRoute(async (identity, req, res) => {
+  res.json(await admin.settlePayout(identity, Number(req.params.id), req.body || {}));
+}));
+
+/** GET /api/admin/wallet-entries?status=&page=&size= → the transaction log. */
+app.get('/api/admin/wallet-entries', adminLimiter, adminRoute(async (identity, req, res) => {
+  const { status, page, size } = req.query || {};
+  res.set('Cache-Control', 'no-store');
+  const result = await socialStore.listWalletEntries({
+    status: typeof status === 'string' ? status : '',
+    page: Number(page),
+    size: Number(size),
+  });
+  res.json({ ...result, page: Math.max(1, Number(page) || 1), size: Math.min(100, Number(size) || 25) });
+}));
+
 // ── Optional: host the SPA from this process ─────────────────────────────────
 if (servesClient) {
   console.info(`[http] serving client bundle from ${CLIENT_DIST}`);
@@ -432,6 +852,9 @@ if (servesClient) {
 
 io.on('connection', (socket) => {
   matchmaker?.attach(socket);
+  // Group calls / conferences run alongside the matchmaker on the same
+  // socket — a user can hold a room open and still queue for1v1.
+  roomHub?.attach(socket);
 
   // Fresh sockets get an immediate presence snapshot so the lobby counter is
   // never `0` while the periodic broadcast is still pending.
@@ -454,6 +877,9 @@ async function main() {
   // degrade to clear 503s instead of pretending to work.
   payments.init(mode);
   admin.init(mode);
+  // The social platform (posts, charges, wallets, rooms) follows the ledger:
+  // it needs the same database and degrades to clear 503s without it.
+  commerce.init(mode);
 
   await settings.load();
   await admin.bootstrap();
@@ -461,6 +887,7 @@ async function main() {
 
   matchmaker = new Matchmaker(io, store);
   matchmaker.startTicker(Number(process.env.PRESENCE_INTERVAL_MS) || 5000);
+  roomHub = new RoomHub(io);
 
   await new Promise((resolve, reject) => {
     server.once('error', reject);
