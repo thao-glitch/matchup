@@ -399,7 +399,9 @@ app.get('/api/posts/:id', readLimiter, async (req, res) => {
 app.get('/api/posts/:id/media', readLimiter, async (req, res) => {
   try {
     const user = await optionalUser(req);
-    await commerce.readPostMedia(user, Number(req.params.id), res);
+    // `?t=` is the signed claim an <img>/`<video>` tag carries in place of a
+    // Bearer header — see `src/mediaToken.js`.
+    await commerce.readPostMedia(user, Number(req.params.id), res, req.query.t);
   } catch (err) {
     sendAuthError(res, err);
   }

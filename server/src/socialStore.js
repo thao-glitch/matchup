@@ -21,6 +21,7 @@
  */
 const mariaStore = require('./mariaStore');
 const crypto = require('crypto');
+const mediaToken = require('./mediaToken');
 
 const query = (...args) => mariaStore.query(...args);
 
@@ -263,13 +264,19 @@ async function listPosts({
 }
 
 /** Feed items → viewer-specific flags in two batched queries, not 2×N. */
-async function decorateForViewer(posts, accountId) {
+async function decorateForViewer(posts, accountId, adultOk = false) {
   if (!posts.length) return posts;
   // `mediaUrl` follows the same rule as the detail route: a viewer who may
   // see the media (free, or paid for) gets the gated URL; everyone else gets
   // null. Without this the feed/explore lists never carry a URL at all and
   // every image post would render its "Media unavailable" fallback.
-  const urlFor = (p, owned) => (owned && p.mediaKey ? `/api/posts/${p.id}/media` : null);
+  // A *paid* URL additionally carries `?t=` — an <img> tag cannot send a
+  // Bearer header, so the claim is the only proof the media route will see.
+  const urlFor = (p, owned) => {
+    if (!owned || !p.mediaKey) return null;
+    const claim = p.price > 0 && accountId ? `?t=${mediaToken.mint(p.id, accountId, adultOk)}` : '';
+    return `/api/posts/${p.id}/media${claim}`;
+  };
   if (!accountId) {
     return posts.map((p) => ({
       ...p,
@@ -295,7 +302,11 @@ async function decorateForViewer(posts, accountId) {
   const likedSet = new Set(likes.map((r) => Number(r.post_id)));
   const ownedSet = new Set(owned.map((r) => Number(r.ref_id)));
   return posts.map((p) => {
-    const owned = p.price <= 0 || ownedSet.has(p.id);
+    // The creator owns their work by definition — the detail route has always
+    // said so; without it here a creator's own priced post renders locked on
+    // their own profile (and withholds its thumbnail).
+    const owned =
+      p.price <= 0 || Number(p.creatorId) === Number(accountId) || ownedSet.has(p.id);
     return {
       ...p,
       liked: likedSet.has(p.id),

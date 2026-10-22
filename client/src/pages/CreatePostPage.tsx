@@ -14,6 +14,7 @@ import type { Post } from '../types/social';
 import { SocialError, createPost, formatKes, netOf, uploadMedia } from '../lib/social';
 import { Link, navigate } from '../lib/router';
 import { AlertIcon, CheckIcon, LockIcon, SpinnerIcon } from '../components/icons';
+import HeroBanner from '../components/HeroBanner';
 
 type Kind = Post['type'];
 const MAX_CAPTION = 2000;
@@ -139,21 +140,25 @@ export default function CreatePostPage({
   // ── Signed out ────────────────────────────────────────────────────────────
   if (!account) {
     return (
-      <div className="mx-auto max-w-md">
-        <div className="card p-6 text-center">
-          <h1 className="text-lg font-bold text-ink">Start earning on Matchup</h1>
-          <p className="mt-2 text-sm leading-relaxed text-muted">
-            Sign in to publish posts, set prices in KES and get paid to your M-PESA wallet.
-          </p>
+      <div className="mx-auto max-w-md space-y-4">
+        {/* The banner carries the pitch (and the page's h1); the card below is
+            left with the single action it exists for. */}
+        <HeroBanner
+          img="/img/hero-create.webp"
+          eyebrow="Create & earn"
+          title="Start earning on Matchup"
+          text="Sign in to publish posts, set prices in KES and get paid to your M-PESA wallet."
+        />
+        <div className="card p-6">
           <button
             type="button"
-            className="btn btn-primary mt-4 w-full"
+            className="btn btn-primary w-full"
             onClick={() => requireAuth('Sign in to start earning.')}
           >
             Sign in to post
           </button>
         </div>
-        <div className="card mt-4 space-y-3 p-5 text-sm">
+        <div className="card space-y-3 p-5 text-sm">
           <p className="label">What an account gives you</p>
           <p className="leading-relaxed text-muted">
             <span className="font-semibold text-ink">Post &amp; earn</span> — sell photos, clips,
@@ -190,12 +195,12 @@ export default function CreatePostPage({
 
   return (
     <form onSubmit={(event) => void submit(event)} className="mx-auto max-w-2xl space-y-4">
-      <div>
-        <h1 className="text-xl font-bold text-ink">Create a post</h1>
-        <p className="text-xs text-muted">
-          Free or paid — you keep {100 - commerce.commissionRate}% of every sale.
-        </p>
-      </div>
+      <HeroBanner
+        img="/img/hero-create.webp"
+        eyebrow="Create & earn"
+        title="Create a post"
+        text={`Free or paid — you keep ${100 - commerce.commissionRate}% of every sale.`}
+      />
 
       {/* ── Type ────────────────────────────────────────────────────────── */}
       <div>

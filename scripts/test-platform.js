@@ -48,6 +48,8 @@ const CREATOR = `tcr${STAMP}`; // ≤24 chars — the account column is VARCHAR(
 const BUYER = `tby${STAMP}`;
 const PASSWORD = 'platform-test-pw-1';
 const TEMP_ADMIN = `tadm${STAMP}`;
+/** Real files this run drops in server/uploads — cleanup unlinks them. */
+const uploadKeys = [];
 
 async function call(method, urlPath, { token, body, raw } = {}) {
   let res;
@@ -57,7 +59,7 @@ async function call(method, urlPath, { token, body, raw } = {}) {
       headers: {
         accept: 'application/json',
         ...(raw ? { 'content-type': raw.type } : {}),
-        ...(body === undefined && !raw ? {} : { 'content-type': 'application/json' }),
+        ...(raw || body === undefined ? {} : { 'content-type': 'application/json' }),
         ...(token ? { authorization: `Bearer ${token}` } : {}),
       },
       body: raw ? raw.body : body === undefined ? undefined : JSON.stringify(body),
@@ -117,6 +119,15 @@ async function connectDb() {
 const run = async (sql, params = []) => (await db.query(sql, params))[0];
 
 async function cleanup() {
+  // Uploaded bytes are not rows: drop the files too (best effort — uploads is
+  // runtime data either way).
+  for (const key of uploadKeys) {
+    try {
+      require('fs').unlinkSync(path.join(__dirname, '..', 'server', 'uploads', path.basename(key)));
+    } catch {
+      /* already gone */
+    }
+  }
   if (!db) return;
   try {
     const ids = [];
@@ -249,6 +260,60 @@ async function main() {
 
   const own = await call('GET', `/api/posts/${postId}`, { token: creatorToken });
   assert(own.data?.post?.owned === true, 'the creator always sees their own post as owned');
+
+  // The same rule has to hold on the *lists* — feed and mine both decorate per
+  // viewer, and a creator who is not `owned` in a list sees their own priced
+  // post locked (and without its thumbnail) on their own profile. The media
+  // half of that contract — a paid image URL that loads in a bare <img> — is
+  // asserted just below, and `npm run seed` re-checks it with real photos.
+  const myRow = (await call('GET', '/api/posts/mine', { token: creatorToken })).data?.items?.find(
+    (p) => p.id === postId,
+  );
+  assert(
+    Boolean(myRow) && myRow.owned === true,
+    'mine-list hands the creator their own priced post',
+  );
+  const feedAsCreator = await call('GET', '/api/posts', { token: creatorToken });
+  const theirRow = feedAsCreator.data?.items?.find((p) => p.id === postId);
+  assert(
+    Boolean(theirRow) && theirRow.owned === true,
+    'the feed shows the creator their own priced post as unlocked',
+  );
+
+  // ── Paid media through a bare <img>: the signed `?t=` claim ────────────────
+  // An <img> tag cannot send an Authorization header, so the media URL handed
+  // to an entitled viewer must work on its own. Upload → price it → read the
+  // URL back exactly as the browser would: no headers at all.
+  const up = await call('POST', '/api/media', {
+    token: creatorToken,
+    raw: { type: 'image/jpeg', body: Buffer.from(`platform-media-${STAMP}`) },
+  });
+  assert(up.status === 201 && Boolean(up.data?.key), `image upload accepted (${up.error ?? 'ok'})`);
+  if (up.data?.key) uploadKeys.push(up.data.key);
+  const pic = await call('POST', '/api/posts', {
+    token: creatorToken,
+    body: { caption: 'a priced photograph', price: 250, type: 'image', mediaKey: up.data?.key },
+  });
+  assert(pic.status === 201, `priced image post published (${pic.error ?? 'ok'})`);
+  const picId = pic.data?.post?.id;
+
+  const picRow = (
+    await call('GET', '/api/posts/mine', { token: creatorToken })
+  ).data?.items?.find((p) => p.id === picId);
+  assert(
+    typeof picRow?.mediaUrl === 'string' && picRow.mediaUrl.includes('/media?t='),
+    'a paid image URL carries a signed claim an <img> can send',
+  );
+
+  const bare = (u) => fetch(`${BASE}${u}`, { signal: AbortSignal.timeout(15_000) });
+  const asImg = await bare(picRow?.mediaUrl ?? '/api/posts/0/media');
+  assert(asImg.status === 200, `the claim alone loads the creator's media (got ${asImg.status})`);
+  const asStranger = await bare(`/api/posts/${picId}/media`);
+  assert(asStranger.status === 402, `without the claim the paywall still says 402 (got ${asStranger.status})`);
+  const tampered = picRow?.mediaUrl
+    ? await bare(`${picRow.mediaUrl.slice(0, -1)}0`)
+    : { status: 0 };
+  assert(tampered.status === 402, `a tampered claim is refused (got ${tampered.status})`);
 
   // ── The charge (STK push or manual — both end at the same ledger row) ──────
   const chargeRes = await call('POST', '/api/charges', {

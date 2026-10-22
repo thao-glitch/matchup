@@ -26,6 +26,7 @@ import {
   WalletIcon,
   flagFromCountry,
 } from '../components/icons';
+import HeroBanner from '../components/HeroBanner';
 
 interface ErrState {
   message: string;
@@ -120,14 +121,16 @@ export default function ProfilePage({
   if (!account) {
     return (
       <div className="mx-auto max-w-md space-y-4">
-        <div className="card p-6 text-center">
-          <h1 className="text-lg font-bold text-ink">Your profile</h1>
-          <p className="mt-2 text-sm leading-relaxed text-muted">
-            Sign in to see your posts, your earnings and everything you have shared.
-          </p>
+        <HeroBanner
+          img="/img/hero-profile.webp"
+          eyebrow="You on Matchup"
+          title="Your profile"
+          text="Sign in to see your posts, your earnings and everything you have shared."
+        />
+        <div className="card p-6">
           <button
             type="button"
-            className="btn btn-primary mt-4 w-full"
+            className="btn btn-primary w-full"
             onClick={() => requireAuth('Sign in to see your profile.')}
           >
             Sign in / create account
@@ -158,6 +161,15 @@ export default function ProfilePage({
 
   return (
     <div className="space-y-4">
+      {/* The banner is the page's identity line — `@name` is the h1 here, so
+          the card below keeps its own heading out of the way. */}
+      <HeroBanner
+        img="/img/hero-profile.webp"
+        eyebrow="You on Matchup"
+        title={`@${account.username}`}
+        text="Your posts, your earnings and everything you have shared live on this page."
+      />
+
       {error && (
         <div className="rounded-xl border border-danger/30 bg-danger/10 px-3.5 py-2.5 text-sm text-danger">
           {error.message}
@@ -176,8 +188,7 @@ export default function ProfilePage({
             </span>
           </span>
           <div className="min-w-0">
-            <h1 className="truncate text-lg font-bold text-ink">@{account.username}</h1>
-            <p className="text-xs text-muted">
+            <p className="truncate text-sm font-semibold text-ink">
               {account.profile?.age ?? '—'} years old
               {gender ? ` · ${gender}` : ''}
             </p>

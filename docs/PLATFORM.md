@@ -98,7 +98,12 @@ rooms(id, slug UNIQUE, title, kind, host_account_id, host_username, price,
 * `wallet_entries.kind`: `sale` | `adjustment` | `withdrawal`;
   `status`: `posted` | `pending` | `approved` | `rejected`.
 * Media files live in `server/uploads/` and are **only** served through
-  `GET /api/posts/:id/media`, which enforces the paywall.
+  `GET /api/posts/:id/media`, which enforces the paywall. A *paid* post's
+  `mediaUrl` carries `?t=<claim>` — a signed, post-scoped, 1h statement of who
+  the URL was minted for (`src/mediaToken.js`). An `<img>`/`<video>` tag cannot
+  send a Bearer header, so the claim is the only credential the media route
+  will see from one; it authenticates the viewer, and the route still re-checks
+  ownership live, so the claim is never a bypass. Bearer requests work too.
 
 ---
 
@@ -110,7 +115,7 @@ rooms(id, slug UNIQUE, title, kind, host_account_id, host_username, price,
 | GET | `/api/posts` | `?page&size&q&adult=0\|1` | `{ items: Post[], total, page, size }` |
 | GET | `/api/posts/mine` | `?page&size` | same, own posts incl. hidden |
 | GET | `/api/posts/:id` | | `{ post: Post }` (counts a view) |
-| GET | `/api/posts/:id/media` | | binary, or 401/402 JSON |
+| GET | `/api/posts/:id/media` | `?t=<claim>` for paid media | binary, or 401/402 JSON |
 | POST | `/api/posts` | `{ caption, price, isAdult, type, mediaKey?, linkUrl? }` | 201 `{ post }` |
 | DELETE | `/api/posts/:id` | | 204 (owner) |
 | POST | `/api/posts/:id/like` | `{ liked: boolean }` | `{ liked, likes }` |
@@ -123,7 +128,7 @@ interface Post {
   id: number; creatorId: number; creatorName: string; creatorCountry: string;
   type: 'image' | 'video' | 'link' | 'text';
   caption: string;
-  mediaUrl: string | null;   // `/api/posts/<id>/media` when the viewer may see it, else null
+  mediaUrl: string | null;   // `/api/posts/<id>/media` (+ `?t=` when paid) when the viewer may see it, else null
   linkUrl: string | null;
   price: number; currency: string;
   isAdult: boolean; status: 'active' | 'hidden' | 'removed';

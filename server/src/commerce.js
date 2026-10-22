@@ -20,6 +20,7 @@ const path = require('path');
 const crypto = require('crypto');
 const mariaStore = require('./mariaStore');
 const socialStore = require('./socialStore');
+const mediaToken = require('./mediaToken');
 const settings = require('./settings');
 const accounts = require('./accounts');
 const mpesa = require('./mpesa');
@@ -181,7 +182,11 @@ async function feed(user, { page, size, q, adult } = {}) {
   // The adult shelf only exists for signed-in adults — regardless of the switch.
   const showAdult = wantsAdult && isAdultAllowed(user);
   const result = await socialStore.listPosts({ page, size, q, adult: showAdult });
-  const items = await socialStore.decorateForViewer(result.items, user?.id ?? null);
+  const items = await socialStore.decorateForViewer(
+    result.items,
+    user?.id ?? null,
+    isAdultAllowed(user),
+  );
   return { ...result, items };
 }
 
@@ -196,7 +201,7 @@ async function mine(user, { page, size } = {}) {
     all: true,
     adult: true,
   });
-  const items = await socialStore.decorateForViewer(result.items, user.id);
+  const items = await socialStore.decorateForViewer(result.items, user.id, isAdultAllowed(user));
   return { ...result, items };
 }
 
@@ -223,7 +228,8 @@ async function postDetail(user, id) {
       accountId: user?.id ?? -1,
     }));
   const liked = user
-    ? (await socialStore.decorateForViewer([{ ...post, owned }], user.id))[0].liked
+    ? (await socialStore.decorateForViewer([{ ...post, owned }], user.id, isAdultAllowed(user)))[0]
+        .liked
     : false;
 
   // The owner always sees their own numbers go up; a viewer's hit is cheap
@@ -236,7 +242,14 @@ async function postDetail(user, id) {
       ...safe,
       liked,
       owned,
-      mediaUrl: owned && post.mediaKey ? `/api/posts/${post.id}/media` : null,
+      // Paid media gets the signed claim an <img>/`<video>` tag can carry —
+      // see `mediaToken.js`; free media needs no credentials at all.
+      mediaUrl:
+        owned && post.mediaKey
+          ? `/api/posts/${post.id}/media${
+              post.price > 0 && user ? `?t=${mediaToken.mint(post.id, user.id, isAdultAllowed(user))}` : ''
+            }`
+          : null,
     },
   };
 }
@@ -244,20 +257,35 @@ async function postDetail(user, id) {
 /**
  * Stream the media file behind a post — the paywall's enforcement point.
  * Files are never exposed statically, so this is the only way in.
+ *
+ * `token` is the signed `?t=` claim from a gated list/detail response: an
+ * <img> tag cannot authenticate any other way. It proves *who* the URL was
+ * minted for; everything it grants is still re-checked here against the live
+ * rows (post active, buyer still entitled, adult gate), so the claim is an
+ * identity for the request, never a bypass of the rules.
  */
-async function readPostMedia(user, id, res) {
+async function readPostMedia(user, id, res, token) {
   requireDb();
+  if (!Number.isInteger(id) || id <= 0) {
+    throw new AuthError('not-found', 'No media on that post.', 404);
+  }
   const post = await socialStore.getPost(id, { withCountry: false });
   if (!post || post.status === 'removed' || !post.mediaKey) {
     throw new AuthError('not-found', 'No media on that post.', 404);
   }
-  if (post.isAdult && !isAdultAllowed(user)) {
+  const claim = token ? mediaToken.verify(id, token) : null;
+  const viewerId = user?.id ?? claim?.accountId ?? null;
+  // A Bearer request is evaluated live; a claim carries the18+ verdict it was
+  // minted with (the route only ever mints after that viewer passed the gate).
+  const adultOk = user ? isAdultAllowed(user) : Boolean(claim?.adult);
+  if (post.isAdult && !adultOk) {
     throw new AuthError('adult-only', 'This post is for accounts aged 18 and over.', 403);
   }
   const owned =
     post.price <= 0 ||
-    post.creatorId === user?.id ||
-    (await socialStore.isEntitled({ purpose: 'post', refId: post.id, accountId: user?.id ?? -1 }));
+    (viewerId !== null && post.creatorId === viewerId) ||
+    (viewerId !== null &&
+      (await socialStore.isEntitled({ purpose: 'post', refId: post.id, accountId: viewerId })));
   if (!owned) {
     throw new AuthError('payment-required', 'Pay to unlock this post.', 402);
   }

@@ -299,11 +299,34 @@ async function main() {
   const freeOpen = free.every((r) => typeof r.mediaUrl === 'string' && r.mediaUrl.length > 0);
   const paidLocked = paid.every((r) => r.mediaUrl === null);
 
+  // The creator's own view: a priced post they wrote must come back owned and
+  // carrying its media, or their profile shows a locked card of their own work
+  // with no thumbnail. This is the list route's half of the paywall contract —
+  // `test:platform` asserts the same ownership flag on text posts, but only
+  // these seeded photographs can prove the URL is handed over.
+  const withPaid = CREATORS.find((c) => c.posts.some((p) => p.price > 0));
+  const mine = await call('GET', '/api/posts/mine?size=50', { token: tokens[withPaid.username] });
+  const ownPaid = (mine.data?.items || []).find((p) => p.price > 0);
+  const creatorSeesMedia =
+    mine.status === 200 &&
+    Boolean(ownPaid) &&
+    ownPaid.owned === true &&
+    typeof ownPaid.mediaUrl === 'string' &&
+    ownPaid.mediaUrl.length > 0;
+
+  // …and that URL must load with no Authorization header at all: an <img> tag
+  // cannot send one, so a paid `mediaUrl` carries a signed `?t=` claim
+  // (see server/src/mediaToken.js) and the media route accepts it alone.
+  const bare = creatorSeesMedia ? await call('GET', ownPaid.mediaUrl) : { status: 0 };
+  const claimLoads = bare.status === 200;
+
   console.log('');
   console.log(`seeded: ${rows.length} post(s) from ${CREATORS.length} creators, ${likes} like(s), ${comments} comment(s)`);
   console.log(`  free posts open to anyone: ${freeOpen ? 'ok' : 'FAIL'} (${free.length})`);
   console.log(`  priced posts stay locked:  ${paidLocked ? 'ok' : 'FAIL'} (${paid.length})`);
-  if (!freeOpen || !paidLocked) process.exit(1);
+  console.log(`  creator sees own paid media: ${creatorSeesMedia ? 'ok' : 'FAIL'}`);
+  console.log(`  paid URL loads without a header: ${claimLoads ? 'ok' : 'FAIL'}`);
+  if (!freeOpen || !paidLocked || !creatorSeesMedia || !claimLoads) process.exit(1);
 }
 
 main().catch((err) => {

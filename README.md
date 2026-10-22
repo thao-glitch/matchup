@@ -24,7 +24,7 @@ server**; the server only introduces people and relays a few kilobytes of SDP/IC
 mute/camera → chat → Spark → rock-paper-scissors duel → hang-up → *Next* →
 re-match → share card → live country board → the Passport → accounts →
 telemetry), 46/46 when pinned through the TURN relay, 28/28 account checks,
-32/32 platform checks (commission split, M-PESA charges, wallets, payouts),
+40/40 platform checks (commission split, M-PESA charges, wallets, payouts),
 26/26 dashboard checks, 16/16 signaling checks, plus a live STUN/TURN
 `Allocate` verification. See [Testing](#7-testing).
 
@@ -131,7 +131,7 @@ matchup/
 │   ├── test-db.js                   # is the app really linked to the database?
 │   ├── test-auth.js                 # 28 checks: the whole account lifecycle
 │   ├── test-admin.js                # 26 checks: the dashboard (login, ledger, bans)
-│   ├── test-platform.js             # 32 checks: posts, M-PESA charges, commission, wallets
+│   ├── test-platform.js             # 40 checks: posts, M-PESA charges, commission, wallets
 │   ├── test-ui.js                   # 15 checks: the social shell renders, tabs resolve
 │   ├── test-turn.js                 # real STUN Allocate against your TURN server
 │   ├── e2e.js                       # 43 checks (46 with E2E_RELAY=1): Chromium + WebRTC
@@ -199,6 +199,8 @@ Open **two tabs** on `http://localhost:5173`, fill in two complementary profiles
 | `TWILIO_AUTH_TOKEN`  | alt      | ↑                                                                |
 | `PRESENCE_INTERVAL_MS` | no     | Live counter push interval (default `5000`)                        |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | no | Creates the first `/admin` dashboard login on the very first boot (10+ chars). Ignored afterwards — the dashboard owns its credentials |
+| `MEDIA_TOKEN_SECRET` | no       | Key for the signed `?t=` claims on paid media URLs. Unset ⇒ a random per-boot key (fine for one instance; set it if you scale past one so links survive restarts/instances) |
+| `MEDIA_TOKEN_TTL_MS` | no       | How long a paid-media claim stays valid (default `3600000` = 1h)     |
 
 ### `client/.env.local`
 
@@ -929,10 +931,12 @@ npm run test:db
 # revocation. Cleans up every row it created.
 npm run test:auth
 
-# Platform: 32 checks — commission split (15% of KES 400 → 340 to the
+# Platform: 40 checks — commission split (15% of KES 400 → 340 to the
 # creator), the M-PESA charge lifecycle (open → approved → settled, wallet
 # credited once, double-approval is a no-op), paywall unlocking for the payer
-# only, payout requests reserving the balance, post hide/restore, rooms over
+# only, a creator seeing their own priced post as unlocked in every list,
+# a paid media URL loading in a bare <img> via its signed `?t=` claim,
+# payout requests reserving the balance, post hide/restore, rooms over
 # signaling, commerce + mpesa settings and the audit trail. Needs the server
 # running against MariaDB; cleans up every row it created.
 npm run test:platform
