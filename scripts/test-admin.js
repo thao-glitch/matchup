@@ -231,41 +231,47 @@ async function main() {
   assert(Boolean(row), 'the new user shows up in the dashboard list');
   userId = row?.id ?? userId;
 
-  // ── Payment: one reference, approved once ────────────────────────────────
-  const intent1 = await call('POST', '/api/payments/intent', { token: userToken, body: {} });
-  assert(intent1.status === 201, `payment intent created (${intent1.status})`);
-  const intent2 = await call('POST', '/api/payments/intent', { token: userToken, body: {} });
+  // ── Premium (M-PESA STK push) ──────────────────────────────────────────────
+  // Premium is an STK prompt now: no account number to copy, nothing for the
+  // owner to approve. Firing a real prompt needs a live Daraja shortcode,
+  // which a test box will not have, so this asserts the contract that holds
+  // either way.
+  const mine = await call('GET', '/api/payments/mine', { token: userToken });
+  assert(mine.status === 200, `premium ledger reads (${mine.status})`);
   assert(
-    intent1.data?.payment?.accountNo === intent2.data?.payment?.accountNo,
-    'a second intent reuses the same account number',
-  );
-  const paymentId = intent1.data?.payment?.id;
-
-  const pending = await call('GET', '/api/admin/payments?status=pending', { token: adminToken });
-  assert(
-    pending.data?.items?.some((p) => p.id === paymentId),
-    'the pending payment appears in the ledger',
+    mine.data && 'premiumUntil' in mine.data && 'open' in mine.data && 'payments' in mine.data,
+    'the premium ledger reports premiumUntil, the open charge and receipts',
   );
 
-  const approve = await call('PATCH', `/api/admin/payments/${paymentId}`, {
-    token: adminToken,
-    body: { status: 'approved', note: 'test: matched on the statement' },
+  const intent = await call('POST', '/api/payments/intent', {
+    token: userToken,
+    body: { phone: '0712345678' },
   });
-  assert(approve.data?.payment?.status === 'approved', 'payment approved');
+  if (intent.status === 201) {
+    const charge = intent.data?.payment;
+    assert(charge?.status === 'pending', 'the charge opens and waits for the PIN');
+    const again = await call('POST', '/api/payments/intent', {
+      token: userToken,
+      body: { phone: '0712345678' },
+    });
+    assert(
+      again.data?.payment?.id === charge.id,
+      'a second pay tap reuses the open charge instead of prompting twice',
+    );
+  } else {
+    assert(
+      intent.data?.error?.code === 'mpesa-not-configured',
+      `without a Daraja shortcode the charge refuses clearly (${intent.data?.error?.code})`,
+    );
+  }
 
-  const afterApprove = await call('GET', '/api/auth/me', { token: userToken });
-  const firstExpiry = afterApprove.data?.user?.premiumUntil;
-  assert(Boolean(firstExpiry), `approval granted premium until ${firstExpiry}`);
-
-  // Approving the same row again must be a no-op — nobody gets 60 days for 30.
-  await call('PATCH', `/api/admin/payments/${paymentId}`, {
-    token: adminToken,
-    body: { status: 'approved' },
-  });
-  const afterSecond = await call('GET', '/api/auth/me', { token: userToken });
+  const mpesaTest = await call('POST', '/api/admin/mpesa/test', { token: adminToken, body: {} });
+  assert(mpesaTest.status === 200, `the dashboard can test the Daraja setup (${mpesaTest.status})`);
+  const checks = mpesaTest.data?.checks;
+  assert(Array.isArray(checks) && checks.length > 0, 'the test reports one line per requirement');
   assert(
-    afterSecond.data?.user?.premiumUntil === firstExpiry,
-    'approving twice does not extend premium twice',
+    checks.some((check) => check.name === 'shortcode'),
+    'the test calls out a missing shortcode specifically',
   );
 
   // ── Ban ──────────────────────────────────────────────────────────────────

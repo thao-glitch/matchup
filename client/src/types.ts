@@ -33,33 +33,34 @@ export interface AccountUser {
   username: string;
   profile: Profile;
   createdAt?: string | null;
-  /** Paybill entitlement: ISO timestamp of when premium runs out, or null. */
+  /** Premium entitlement: ISO timestamp of when it runs out, or null. */
   premiumUntil?: string | null;
 }
 
 /**
- * One row of the paybill ledger, as the signed-in user sees it
- * (`/api/payments/*`). `accountNo` is what they type as the Account Number at
- * the paybill — the single value that ties an incoming bank payment to them.
+ * One premium purchase as the buyer sees it (`/api/payments/*`).
+ *
+ * This is a charge, not a reference: the phone was prompted for its PIN and
+ * Daraja answers for itself, so there is no account number to copy and no
+ * "I have paid" button to press. `premiumUntil` is read fresh from the row
+ * that settles, because the callback may have just changed it.
  */
-export interface PaymentIntent {
+export interface PremiumPayment {
   id: number;
-  /** `pending` → waiting for the owner to check the bank statement. */
-  status: 'pending' | 'approved' | 'rejected';
-  bank: string;
-  paybill: string;
-  accountNo: string;
+  /** `pending` → the phone has the prompt up; `paid` → premium is live. */
+  status: 'pending' | 'paid' | 'failed' | 'expired';
   amount: number;
   currency: string;
-  productName: string;
+  /** The period quoted when the prompt was sent, stamped onto the charge. */
   premiumDays: number | null;
-  /** The M-PESA / bank transaction code the payer copied in (optional). */
-  providerRef: string | null;
-  note: string | null;
-  instructions: string;
-  supportContact: string;
+  phone: string;
+  /** The M-PESA receipt, once one exists. */
+  mpesaRef: string | null;
+  /** Why it failed — only set on a `failed` charge. */
+  error: string | null;
   createdAt: string | null;
-  reviewedAt: string | null;
+  paidAt: string | null;
+  premiumUntil: string | null;
 }
 
 /** The subset of a profile that is ever shared with the other side of a match. */

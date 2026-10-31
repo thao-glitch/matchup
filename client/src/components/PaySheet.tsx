@@ -3,17 +3,14 @@
  * you, type your PIN". One component serves every paid thing on the platform
  * (a locked post, a room entry) because the money flow is identical.
  *
- * Two modes, decided by `config.commerce.payMode` (edited in `/admin`):
+ * Daraja pushes the prompt immediately; the sheet waits on `waitForPayment()`,
+ * which polls the charge until the callback settles it (usually 1–3 s after
+ * the PIN lands). The only truth here is `charge.status` — the moment it
+ * reads `paid`, `onPaid` unlocks the content.
  *
- *   `stk`    → Daraja pushes the prompt immediately; the sheet waits on
- *              `waitForPayment()`, which polls the charge until the callback
- *              settles it (usually 1–3 s after the PIN lands).
- *   `manual` → no callback exists, so the sheet shows the paybill + reference,
- *              takes an "I have paid" confirmation and waits for the owner to
- *              approve it from the dashboard.
- *
- * Either way the UI only ever watches `charge.status` — `pending → paid` is
- * the single truth, and the moment it flips, `onPaid` unlocks the content.
+ * There is no paybill fallback: every payment is an STK push, so a missing
+ * Daraja setup is a disabled Pay button with an explanation, not a second
+ * way to pay that someone has to reconcile by hand.
  */
 import { useEffect, useRef, useState } from 'react';
 import type { AccountUser } from '../types';
@@ -40,7 +37,7 @@ export interface PaySheetProps {
   onClose: () => void;
 }
 
-type Phase = 'form' | 'sending' | 'waiting' | 'confirmed' | 'error';
+type Phase = 'form' | 'sending' | 'waiting' | 'error';
 
 export default function PaySheet({
   target,
@@ -63,12 +60,11 @@ export default function PaySheet({
     };
   }, []);
 
-  const stkMode = config.commerce.payMode === 'stk';
   const amount = Math.round(target.amount);
   /** Double-tapping Pay must not open two STK pushes. */
   const busy = phase === 'sending' || phase === 'waiting';
 
-  /** Open the charge, then either watch the STK prompt or show instructions. */
+  /** Open the charge, then watch the STK prompt until it settles. */
   async function start() {
     if (busy) return;
     if (!account) {
@@ -87,14 +83,8 @@ export default function PaySheet({
       const opened = await createCharge({ purpose: target.purpose, refId: target.refId, phone });
       if (!alive.current) return;
       setCharge(opened.charge);
-
-      if (stkMode) {
-        setPhase('waiting');
-        await watch(opened.charge.id);
-      } else {
-        // Manual: the row is the request; "I have paid" starts the watch.
-        setPhase('confirmed'); // reused as the instructions screen
-      }
+      setPhase('waiting');
+      await watch(opened.charge.id);
     } catch (err) {
       if (!alive.current) return;
       const message =
@@ -114,7 +104,8 @@ export default function PaySheet({
           mpesaRef: null,
           checkoutRequestId: null,
           error: null,
-          instructions: null,
+          premiumDays: null,
+          periodDays: target.periodDays ?? null,
           createdAt: new Date().toISOString(),
           paidAt: new Date().toISOString(),
         });
@@ -129,7 +120,6 @@ export default function PaySheet({
   async function watch(id: number) {
     try {
       const settled = await waitForPayment(id, {
-        intervalMs: stkMode ? 3000 : 5000,
         onTick: (next) => {
           if (alive.current) setCharge(next);
         },
@@ -138,8 +128,6 @@ export default function PaySheet({
       if (settled.status === 'paid') {
         setPhase('waiting');
         onPaid(settled);
-      } else if (settled.status === 'pending') {
-        setPhase('confirmed');
       } else {
         setError(settled.error ?? 'The payment did not go through — try again.');
         setPhase('error');
@@ -163,7 +151,11 @@ export default function PaySheet({
         <div className="flex items-start justify-between gap-4">
           <div>
             <p className="text-xs uppercase tracking-wide text-muted">
-              {target.purpose === 'room' ? 'Room entry' : 'Unlock content'}
+              {target.purpose === 'room'
+                ? 'Room entry'
+                : target.purpose === 'sub'
+                  ? 'Creator subscription'
+                  : 'Unlock content'}
             </p>
             <h2 className="mt-1 text-base font-semibold leading-snug text-ink">
               {target.title || 'Paid content'}
@@ -182,7 +174,10 @@ export default function PaySheet({
         <div className="mt-4 flex items-baseline justify-between rounded-xl border border-white/10 bg-surface-3/60 px-4 py-3">
           <span className="text-sm text-muted">Amount</span>
           <span className="text-xl font-bold text-ink">
-            {formatKes(amount)} <span className="text-xs font-medium text-muted">one-off</span>
+            {formatKes(amount)}{' '}
+            <span className="text-xs font-medium text-muted">
+              {target.purpose === 'sub' ? `for ${target.periodDays ?? 30} days` : 'one-off'}
+            </span>
           </span>
         </div>
 
@@ -208,11 +203,9 @@ export default function PaySheet({
               onChange={(event) => setPhone(event.target.value)}
             />
             <p className="mt-2 text-xs leading-relaxed text-muted">
-              {stkMode
+              {config.commerce.mpesaReady
                 ? 'Press Pay and your phone will prompt you — enter your M-PESA PIN to confirm.'
-                : config.commerce.paybill
-                  ? `You will pay with paybill ${config.commerce.paybill}. The owner confirms and your access opens.`
-                  : 'Pay using your bank or M-PESA app, then confirm — the owner releases your access.'}
+                : 'M-PESA is not accepting payments right now — the owner is still finishing the setup.'}
             </p>
             {!account && (
               <p className="mt-3 rounded-xl border border-warn/30 bg-warn/10 px-3 py-2 text-xs text-warn">
@@ -223,7 +216,7 @@ export default function PaySheet({
               type="button"
               className="btn btn-primary mt-4 w-full"
               onClick={() => void start()}
-              disabled={!account}
+              disabled={!account || !config.commerce.mpesaReady}
             >
               {account ? `Pay ${formatKes(amount)}` : 'Sign in to pay'}
             </button>
@@ -243,47 +236,22 @@ export default function PaySheet({
           </div>
         )}
 
-        {/* ── Waiting for the PIN / for the owner ───────────────────────── */}
+        {/* ── Waiting for the PIN ───────────────────────────────────────── */}
         {phase === 'waiting' && (
           <div className="mt-5 rounded-xl border border-accent/30 bg-accent/10 px-4 py-4">
             <div className="flex items-center gap-3">
               <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-accent border-t-transparent" />
-              <p className="text-sm font-semibold text-ink">
-                {stkMode ? 'Check your phone' : 'Waiting for confirmation'}
-              </p>
+              <p className="text-sm font-semibold text-ink">Check your phone</p>
             </div>
             <p className="mt-2 text-xs leading-relaxed text-muted">
-              {stkMode
-                ? `An M-PESA prompt for ${formatKes(amount)} was sent to ${charge?.phone || phone}. Enter your PIN to complete the payment.`
-                : 'The owner is confirming your payment — this screen opens the content automatically.'}
+              An M-PESA prompt for {formatKes(amount)} was sent to {charge?.phone || phone}. Enter
+              your PIN to complete the payment.
             </p>
             <p className="mt-2 text-[11px] text-muted/70">
               {charge?.mpesaRef ? `Receipt ${charge.mpesaRef} · ` : ''}
               Do not close this screen until it confirms.
             </p>
           </div>
-        )}
-
-        {/* ── Manual mode: paybill details + "I have paid" ──────────────── */}
-        {phase === 'confirmed' && !stkMode && charge && (
-          <>
-            <div className="mt-4 rounded-xl border border-white/10 bg-surface-3/60 px-4 py-3 text-sm leading-relaxed text-ink">
-              <p className="whitespace-pre-line text-xs text-muted">{charge.instructions}</p>
-            </div>
-            <button
-              type="button"
-              className="btn btn-primary mt-4 w-full"
-              onClick={() => {
-                setPhase('waiting');
-                void watch(charge.id);
-              }}
-            >
-              I have paid — track it
-            </button>
-            <p className="mt-2 text-[11px] leading-relaxed text-muted/70">
-              Your access opens as soon as the owner sees the money on the statement.
-            </p>
-          </>
         )}
 
         {/* ── Error: try again ──────────────────────────────────────────── */}

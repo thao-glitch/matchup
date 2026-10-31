@@ -1,19 +1,22 @@
 /**
- * Paybill payment client — the user's half of the ledger.
+ * Premium payment client — the buyer's half of the M-PESA prompt.
  *
- * The flow this file implements (the server side is `server/src/payments.js`):
+ * The flow (the server side is `server/src/payments.js`):
  *
- *   1. `createPaymentIntent()` → the app shows *their* unique Account Number,
- *      the configured DTB paybill and the price.
- *   2. They pay into the paybill from their bank app / M-PESA, typing that
- *      Account Number, optionally copying the transaction code into the form.
- *   3. The owner approves the row in `/admin` and premium starts.
+ *   1. `createPaymentIntent(phone)` → the phone prompts for the M-PESA PIN
+ *      immediately. There is no reference number, no account number and no
+ *      "I have paid" button: Safaricom tells us the answer itself.
+ *   2. `waitForPayment(id)` polls the charge until the callback settles it —
+ *      usually 1–3 s after the PIN lands. A callback lost to a firewall still
+ *      resolves, because the server asks Daraja directly once it has had a
+ *      head start.
+ *   3. `fetchMyPayments()` reads the buyer's own receipts and their live
+ *      entitlement, straight from the row that grants it.
  *
- * Nothing here ever talks to the bank: a plain paybill has no callback, so
- * confirmation is a human step by design. All this client does is show the
- * reference and keep the user's own ledger on screen.
+ * Nothing here ever talks to a bank. All of it is the signed-in user's own —
+ * the server refuses a charge that belongs to someone else.
  */
-import type { PaymentIntent } from '../types';
+import type { PremiumPayment } from '../types';
 import { getToken } from './auth';
 import { SIGNALING_URL } from './iceServers';
 
@@ -31,7 +34,7 @@ export class PaymentError extends Error {
 
 async function request<T>(path: string, opts: { method?: 'GET' | 'POST'; body?: unknown } = {}) {
   const token = getToken();
-  if (!token) throw new PaymentError('Please sign in to get a payment reference.', 'unauthorized');
+  if (!token) throw new PaymentError('Please sign in to pay.', 'unauthorized');
 
   let res: Response;
   try {
@@ -64,26 +67,65 @@ async function request<T>(path: string, opts: { method?: 'GET' | 'POST'; body?: 
 }
 
 /**
- * Ask for a payment reference. Safe to call twice: the server returns the
- * SAME open intent (same Account Number) instead of creating a second one,
- * so a reload or an impatient double-tap can never fork the reference.
+ * Prompt the phone for the premium price. Safe to call twice: the server
+ * returns the SAME open charge instead of starting a second prompt, so a
+ * reload or an impatient double-tap can never prompt twice for one payment.
  */
-export async function createPaymentIntent(providerRef?: string): Promise<PaymentIntent> {
-  const data = await request<{ payment: PaymentIntent }>('/intent', {
+export async function createPaymentIntent(phone: string): Promise<PremiumPayment> {
+  const data = await request<{ payment: PremiumPayment }>('/intent', {
     method: 'POST',
-    body: providerRef ? { providerRef } : {},
+    body: { phone },
   });
   return data.payment;
 }
 
-/** The signed-in user's own ledger + when premium (if any) runs out. */
+/** The signed-in user's own receipts + when premium (if any) runs out. */
 export async function fetchMyPayments(): Promise<{
-  payments: PaymentIntent[];
   premiumUntil: string | null;
+  open: PremiumPayment | null;
+  payments: PremiumPayment[];
 }> {
-  const data = await request<{ payments: PaymentIntent[]; premiumUntil: string | null }>('/mine');
+  const data = await request<{
+    premiumUntil: string | null;
+    open: PremiumPayment | null;
+    payments: PremiumPayment[];
+  }>('/mine');
   return {
-    payments: Array.isArray(data?.payments) ? data.payments : [],
     premiumUntil: data?.premiumUntil ?? null,
+    open: data?.open ?? null,
+    payments: Array.isArray(data?.payments) ? data.payments : [],
   };
+}
+
+/** One charge, straight from the poll that settles it. */
+export async function fetchPaymentStatus(id: number): Promise<PremiumPayment> {
+  const data = await request<{ payment: PremiumPayment }>(`/status/${id}`);
+  return data.payment;
+}
+
+/**
+ * Poll until the charge leaves `pending`, calling `onTick` with each read so
+ * the UI can show the live state (receipt, failure reason) as it comes in.
+ *
+ * Stops polling the moment the charge settles or the STK window expires, so
+ * a forgotten tab does not poll a dead charge forever.
+ */
+export async function waitForPayment(
+  id: number,
+  { intervalMs = 3000, timeoutMs = 5 * 60_000, onTick }: {
+    intervalMs?: number;
+    timeoutMs?: number;
+    onTick?: (payment: PremiumPayment) => void;
+  } = {},
+): Promise<PremiumPayment> {
+  const started = Date.now();
+  for (;;) {
+    const payment = await fetchPaymentStatus(id);
+    onTick?.(payment);
+    if (payment.status !== 'pending') return payment;
+    if (Date.now() - started > timeoutMs) {
+      return { ...payment, status: 'expired', error: payment.error ?? 'The request timed out.' };
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
 }

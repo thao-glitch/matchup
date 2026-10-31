@@ -1,152 +1,170 @@
-# Accepting payments through your DTB paybill
+# Accepting payments: M-PESA STK push, straight to your number
 
-Matchup takes money the Kenyan way: **paybill first, everything else later**.
-There is no card form and no redirect in the app — a visitor pays into your
-Diamond Trust Bank paybill from their own bank app or M-PESA, and the app
-matches that payment back to their account using a unique **Account Number**.
+Matchup takes money the Kenyan way, but it does not wait for a bank
+statement. A visitor enters their M-PESA number, their phone prompts them for
+the PIN, and the moment they confirm, Safaricom's callback settles the charge
+and premium switches on. There is no card form, no redirect, no account
+number to copy and nothing for you to approve by hand.
 
-This guide covers the two halves: what to ask DTB for, and how the app is
-wired to it.
+This guide covers both halves: what you need from Safaricom, and how the app
+is wired to it.
 
 ---
 
-## 1. What DTB actually issues
+## 1. The one thing to understand first
 
-DTB does not sell a "paybill" as a standalone product — it is issued against a
-business account, and how automated you can get depends on which collection
-product you attach to it.
+**STK push bills against a shortcode, not against a bare phone number.**
+Daraja's `/mpesa/stkpush/v1/processrequest` requires a `BusinessShortCode`
+in the request. Without one Safaricom rejects it outright — that is not a
+Matchup limitation, it is how Lipa na M-PESA Online works.
 
-| What you ask DTB for | What you get | Automation |
+Here is the part that matters for you: **you do not need a business bank
+account for the money to reach your own phone.** The flow is:
+
+```
+buyer's phone  ──PIN──▶  your shortcode's collection account  ──settlement──▶  your M-PESA number
+```
+
+The shortcode is only the collection point. You tell Safaricom to get its
+balance onto a number you choose, and that number is yours — the same personal
+M-PESA line you use every day. That last hop is configured on Safaricom's side,
+not in this codebase, and it is the step that makes "my number receives the
+cash" true.
+
+So what you need from Safaricom is:
+
+| What | Why | Roughly |
 | --- | --- | --- |
-| **DTB business account** (Classic Business Current) | A 10-digit account number you own | — |
-| **Lipa na M-PESA / Paybill collections on 516600** | Payers send to **Paybill 516600** and quote *your* short code / account number as the Account Number | Manual — you read the notification or statement |
-| **Till Moja** (collections service) | Instant credit notifications into the account for mobile-money collections | SMS/e-mail advices + portal |
-| **InfinitiLite** (merchant collections portal) | Merchant management, transaction reports, reconciliation | Semi-automated portal |
-| **DTB i24/7 internet banking** | Real-time statement, e-mail/SMS payment advices, bulk reports | The statement is what you reconcile against |
-| **DTB Astra (API Banking)** | REST APIs for payment status, statements, account data | Fully automated callback / polling |
+| A **Paybill** *or* **Buy Goods till** number | It is the `BusinessShortCode` every STK push bills against | Applying is free |
+| Its **balance settled to your M-PESA number** | So the collected money lands on your line, not in a bank | Set on registration (paybill) / withdrawn from the shortcode (till) |
+| A **Lipa na M-PESA Online passkey** | Signs the request — long string, issued with the shortcode, not your account password | Issued with the shortcode |
+| **Consumer key + secret** | The Daraja app credentials that fetch the OAuth token | Free, from the Daraja portal |
 
-**Paybill 516600 is DTB's shared collection number.** Your customers pay into
-`516600` and put *your* identifier in the Account Number field — either your
-10-digit DTB account number, or the merchant **Short Code** DTB assigns you
-when you onboard for collections. Which one you use is decided when you open
-the product; ask the branch explicitly: *"I want a collection short code on
-516600 that passes the payer's Account Number reference through to my
-statement."* That single sentence is what makes the app's automatic matching
-work.
+**Paybill or till?** STK push supports both, but the request has to name the
+rail: `CustomerPayBillOnline` bills a Paybill, `CustomerBuyGoodsOnline` bills a
+Buy Goods till, and Safaricom rejects a mismatch. Tell the app which one you
+hold under **Settings → M-PESA → Shortcode type** (it defaults to Paybill).
 
-> Contact DTB on **0719 031 888** or `contactcentre@dtbafrica.com`, or walk
-> into any branch with your KRA PIN, business registration and ID. Verify any
-> link you are asked to log into directly with the bank — never through a
-> search result.
+If you are applying from scratch, the **till is the easier one to get**: an
+individual can apply without a registered company (national ID + KRA PIN; a
+county business permit is often asked for too), it is free, and it is usually
+issued within about a day. Apply at **hub.m-pesaforbusiness.co.ke** → *Apply for
+a Paybill or Till*, or walk into a Safaricom Shop with the Lipa na M-PESA form.
+Money collects on the till and you withdraw it to your own M-PESA number from
+there. A **Paybill** needs fuller business KYC and settles its balance to your
+number on Safaricom's side — either way the cash ends on your personal line.
+
+> If you have no shortcode yet, everything still works against the Daraja
+> **sandbox** (`174379` + the sandbox passkey) so you can finish wiring and
+> testing the app. Real money needs the production shortcode.
 
 ---
 
-## 2. The three ways to receive a payment into the app
+## 2. How the app is wired
 
-### Option A — Manual reconciliation (what this app does out of the box)
+One table, `charges`, holds every payment on the platform — premium, post
+purchases and room entry alike:
 
-Zero agreements, works on day one:
+1. **The row is written first**, then the STK push is fired. The
+   `CheckoutRequestID` is written onto the row immediately after, and it is
+   unique-indexed, so a callback arriving in the same millisecond still finds
+   its row.
+2. **Their phone prompts for the PIN.** They confirm, and Safaricom POSTs to
+   `POST /api/mpesa/callback`.
+3. **`settle()` flips `pending → paid`.** That UPDATE carries a
+   `WHERE status = 'pending'`, so the callback, a status poll and a manual
+   dashboard click can all race it and exactly one of them wins — nobody is
+   ever charged twice, and nobody is ever granted premium twice.
+4. **Polling is the safety net.** Callbacks get lost (firewalls, restarts,
+   tunnel changes), so while the charge is pending the client polls it and
+   the server asks Daraja's query endpoint directly after giving the callback
+   a six-second head start. Three independent ways to reach `paid`.
 
-1. The visitor presses **Pay by paybill** in the lobby. The app shows:
-   - **Paybill:** `516600` (or whatever you configured)
-   - **Account Number:** their unique reference, e.g. `MU1042`
-   - **Amount:** whatever you set (e.g. KES 500)
-2. They pay from any bank app / M-PESA (`Paybill → 516600 → MU1042 → 500 → PIN`).
-3. They press **I have paid**, optionally pasting the M-PESA transaction code.
-4. You open **`/admin` → Payments**, look at the pending row, check your DTB
-   i24/7 statement (or the M-PESA SMS) for `MU1042`, and press **Approve**.
+For a premium charge, settling stamps `premium_until` on the **buyer** — they
+bought time, not credit, so no creator wallet is touched.
 
-Approval stamps 30 days of premium on that account. The whole step takes about
-five seconds once the money is visible on the statement.
-
-### Option B — Statement upload / copy-paste reconciliation
-
-Same as Option A, but instead of eyeballing each payment you download the day's
-statement from i24/7 and check the batch. The ledger in `/admin` is sorted so a
-day's pending rows can be ticked off in one sitting.
-
-### Option C — Automated (DTB Astra / Till Moja / InfinitiLite)
-
-Ask DTB for **API Banking (Astra)** access and they give you credentials for
-their collection/status endpoints. Wiring that into Matchup means adding a
-small webhook/poller that calls `PATCH /api/admin/payments/:id` with
-`{"status":"approved"}` — the same call the dashboard button makes, so nothing
-else in the app changes. Until DTB issues API credentials, Option A is the
-normal Kenyan setup and is what most SMEs run.
+The period is stamped onto the charge row when it is opened, so editing the
+price or the premium length in Settings later cannot change what someone was
+already prompted for.
 
 ---
 
 ## 3. Configuring the app
 
-Everything below is edited in the dashboard — **`/admin` → Settings** — and
-takes effect immediately for every visitor. No redeploy, no code change.
+Everything below is edited in **`/admin` → Settings** and takes effect
+immediately for every visitor. No redeploy, no code change.
+
+**Premium subscription** — the price, the number of days granted, the product
+name on the button, and the wording shown under it.
+
+**M-PESA (Daraja)**
 
 | Setting | Example | What it does |
 | --- | --- | --- |
-| **Enabled** | on | Master switch for the whole payment panel |
-| **Bank** | `Diamond Trust Bank (DTB)` | Shown next to the price |
-| **Paybill** | `516600` | The number the payer selects |
-| **Account number format** | `MU{id}` | The unique reference per user. `{id}` = their account id, `{username}` = their username. Keep it short and alphanumeric — M-PESA truncates long references |
-| **Price** | `500` | KES charged per period |
-| **Premium days** | `30` | Days granted when a payment is approved |
-| **Instructions** | free text | Rendered under the paybill block |
-| **Support contact** | `07xx xxx xxx` | Shown when a payment is rejected |
+| **Consumer key / secret** | from the Daraja portal | Fetch the OAuth token. Masked on read; saving without retyping keeps the stored value |
+| **Shortcode** | your Paybill or till number | The `BusinessShortCode` every push bills against |
+| **Shortcode type** | `Paybill` or `Buy Goods till` | Picks `CustomerPayBillOnline` vs `CustomerBuyGoodsOnline`. Must match the shortcode you entered, or Safaricom rejects every prompt |
+| **Passkey** | the Lipa na M-PESA Online passkey | Signs the request. This is *not* your account password |
+| **Base URL** | `https://api.safaricom.co.ke` | `https://sandbox.safaricom.co.ke` while testing |
+| **Callback URL** | `https://<your-host>/api/mpesa/callback` | Must be public **https** — Safaricom refuses plain http and cannot reach localhost |
 
-**Which account-number format to pick.** The value has to (a) fit in the
-Account Number field of the payer's app — 1–13 characters is safe — and (b) be
-unique per user. `MU{id}` gives `MU1042`, `MU77`, `MU1204`: unique, short,
-case-insensitive-proof. If DTB gives you a numeric-only short code, use
-`{id}` alone.
-
-> Changing the format does not break anything: any *pending* payment's
-> reference is rewritten to the new format the next time that user opens the
-> panel. Already-approved payments keep the reference they were paid with.
+**Callback URL is the field people get wrong.** Safaricom has to be able to
+reach it from the public internet. If your app is behind a tunnel, put the
+tunnel's https URL there. Without a reachable callback, verification falls
+back to polling, which works but is slower.
 
 ---
 
-## 4. Daily routine (the two-minute version)
+## 4. Testing before you announce it
 
-1. Open DTB i24/7 (or the M-PESA confirmation SMS batch) for the day.
-2. Open `https://<your-app>/admin` → **Payments** → *Pending*.
-3. Match the Account Number column against the statement row.
-4. **Approve** (grants premium) or **Reject** (with a note the user sees).
+`/admin` → Settings → **M-PESA** has a **Test connection** button. It reports
+one line per requirement — credentials, shortcode, passkey, callback,
+whether Safaricom issued a token — so you can tell "my key is wrong" apart
+from "my shortcode is missing" without reading a stack trace.
 
-Every action is written to the **Audit** tab with your admin name, the amount
-and the transaction code — so a disputed payment can always be traced.
+Give it a phone number and it fires a **real KES 1 STK prompt** at that
+number. That is the only honest end-to-end proof: Safaricom validates the
+shortcode and passkey when it builds the prompt, so nothing upstream of it
+can lie to you. A real KES 1 is actually charged, which is a cheap price for
+knowing it works.
 
----
+Then run the full loop:
 
-## 5. Fees, taxes and compliance — the honest list
-
-- **M-PESA/transact fees** on 516600 are charged by DTB per collection; check
-  the current tariff with the bank (they revise it).
-- Money collected through a business account is business revenue: keep the
-  statement, and file it with your KRA obligations (a KRA PIN for the business
-  is required to open the account anyway).
-- If you later outgrow manual reconciliation, DTA/Astra API access is the
-  upgrade path — nothing in the app has to change.
-
----
-
-## 6. Testing before you announce it
-
-1. Set a small price in `/admin` → Settings (e.g. `50`).
-2. Pay it yourself from your own phone: `516600` → your format → amount.
-3. Press **I have paid**, paste the real transaction code.
-4. Approve it in `/admin` → **Payments**.
-5. Reload the lobby: the panel must read *Premium active until …*.
-6. Set the real price afterwards.
-
-An approved payment never expires early — approving the same row twice does
-**not** extend the premium twice; re-approving is a no-op by design.
+1. Set a small price in Settings (e.g. `50`).
+2. Press **Pay with M-PESA** in the lobby from your own phone.
+3. Enter your PIN. The panel must flip to *Premium active* within a few
+   seconds, without you touching the dashboard.
+4. Check `/admin` → **Earnings** — the charge is there, marked paid, with its
+   M-PESA receipt.
+5. Set the real price afterwards.
 
 ---
 
-## 7. If something goes wrong
+## 5. Fees, taxes and compliance
+
+- **Transaction fees** apply per collection; check the current tariff with
+  Safaricom, they revise it.
+- Money collected through your shortcode is your revenue. Keep the M-PESA
+  statements — they are what you file against your KRA obligations.
+- Getting that money onto your own number is a Safaricom configuration —
+  settlement for a paybill, a withdrawal for a till. It does not change
+  anything in this app.
+
+---
+
+## 6. If something goes wrong
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
-| Payer's reference is missing from the statement | DTB credited by account number only | Ask DTB to enable "pass through account/reference" on the collection code |
-| Payment arrived but the row is missing | The payer never pressed **I have paid** | Approve manually from `/admin` once you know the account number, or ask them to press it |
-| Wrong premium length granted | Settings changed after the intent was created | The payment row stores its own `premiumDays` — approve, then adjust the user from `/admin` → Users |
-| Panel says payments disabled | `Enabled` or the premium feature is off in Settings | Switch it back on |
+| *"M-PESA cannot take a payment yet — the shortcode is still missing"* | No `BusinessShortCode` configured | Add your Paybill or till number in Settings. STK push cannot run without one |
+| *"M-PESA rejected the credentials"* | Consumer key/secret wrong or expired | Re-copy them from the Daraja portal, save, then **Test connection** |
+| The prompt never arrives on the phone | Wrong shortcode or passkey — Safaricom refuses the request silently on the buyer's side | **Test connection** with your own number; it reports the exact refusal |
+| Same, and the refusal names the transaction type | **Shortcode type** does not match the shortcode (paybill set against a till, or the reverse) | Set *Settings → M-PESA → Shortcode type* to the rail your number actually is |
+| The prompt arrives, they pay, but the panel stays pending | The callback URL is not reachable from the public internet | Fix the URL in Settings (https, public host). The poll will still settle it — just slower |
+| *"That payment does not exist"* when polling | The charge expired — STK requests die after 5 minutes | Press pay again |
+| Wrong premium length | — | The charge stores its own `premiumDays`. Adjust the user from `/admin` → Users if a past charge was mispriced |
+| Panel says M-PESA is not accepting payments | The premium switch, or Daraja readiness, is off | Switch premium on in Settings and complete the M-PESA block |
+
+A charge whose callback never arrived can still be settled by hand from
+`/admin` → **Earnings**. `settle()` is idempotent, so clicking it cannot
+double-grant premium even if the callback shows up a second later.

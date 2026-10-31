@@ -16,6 +16,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
   errorMessage,
+  formatBytes,
   formatClock,
   formatDurationMs,
   formatKes,
@@ -75,7 +76,24 @@ export default function OverviewTab() {
     };
   }, [reload]);
 
-  const days = useMemo(() => (data ? chartDays(data.payments.byDay) : []), [data]);
+  /**
+   * The live money. Every payment is a charge, so the chart reads the settled
+   * charge rows — the legacy `payments` ledger stopped receiving rows the
+   * moment premium moved onto the STK flow.
+   */
+  const days = useMemo<DayTotal[]>(
+    () =>
+      data
+        ? chartDays(
+            data.commerce.charges.byDay.map((row) => ({
+              day: row.day,
+              count: row.count,
+              total: row.gross,
+            })),
+          )
+        : [],
+    [data],
+  );
   const revenue14 = useMemo(() => days.reduce((sum, day) => sum + day.total, 0), [days]);
 
   if (!data && !error) return <Loading what="overview" />;
@@ -114,19 +132,22 @@ export default function OverviewTab() {
               </div>
             </Panel>
 
-            <Panel title="Payments" hint={`Approved total ${formatKes(data.payments.approvedTotal)}`}>
+            <Panel
+              title="Payments (STK)"
+              hint={`Collected ${formatKes(data.commerce.charges.gross)} · house keeps ${formatKes(data.commerce.charges.commission)}`}
+            >
               {/* 2 columns under `sm`: a wide "Ksh 1,250,000" value would
                   overflow an 80px cell in a 4-up grid on a phone. */}
               <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
                 <Stat
-                  label="Pending"
-                  value={data.payments.pending}
-                  tone={data.payments.pending > 0 ? 'warn' : undefined}
-                  hint="awaiting review"
+                  label="In progress"
+                  value={data.commerce.charges.pending}
+                  tone={data.commerce.charges.pending > 0 ? 'warn' : undefined}
+                  hint="awaiting the PIN"
                 />
-                <Stat label="Approved" value={data.payments.approved} />
-                <Stat label="Rejected" value={data.payments.rejected} />
-                <Stat label="Revenue" value={formatKes(data.payments.approvedTotal)} tone="ok" />
+                <Stat label="Paid" value={data.commerce.charges.paid} tone="ok" />
+                <Stat label="Failed" value={data.commerce.charges.failed} />
+                <Stat label="Collected" value={formatKes(data.commerce.charges.gross)} tone="ok" />
               </div>
             </Panel>
 
@@ -168,16 +189,70 @@ export default function OverviewTab() {
             </Panel>
           </div>
 
-          {/* The two series come from the same `payments.byDay` rows: count of
-              approved payments per day, and the money that day brought in. */}
+          {/* The two series come from the same settled-charge rows: payments
+              that landed per day, and the money those days brought in. */}
           <div className="grid gap-4 lg:grid-cols-2">
-            <Panel title="Approvals per day" hint="Last 14 days">
-              <DayBars days={days} pick={(d) => d.count} label={(d) => `${d.day}: ${d.count} approved`} barClass="bg-accent/70 hover:bg-accent" />
+            <Panel title="Payments per day" hint="Last 14 days">
+              <DayBars days={days} pick={(d) => d.count} label={(d) => `${d.day}: ${d.count} paid`} barClass="bg-accent/70 hover:bg-accent" />
             </Panel>
             <Panel title="Revenue per day" hint={`14-day total ${formatKes(revenue14)}`}>
               <DayBars days={days} pick={(d) => d.total} label={(d) => `${d.day}: ${formatKes(d.total)}`} barClass="bg-ok/60 hover:bg-ok" />
             </Panel>
           </div>
+
+          {data.database && (
+            <Panel
+              title="Database"
+              hint={`${data.database.version} · ${data.database.database} · up ${formatUptime(data.database.uptimeSec)} · media: ${data.media?.objectStorage ? 'Vercel Blob' : 'MariaDB'}`}
+            >
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                <Stat label="Total size" value={formatBytes(data.database.totalBytes)} hint="data + indexes" />
+                <Stat label="Data" value={formatBytes(data.database.dataBytes)} />
+                <Stat label="Indexes" value={formatBytes(data.database.indexBytes)} />
+                <Stat
+                  label="Connections"
+                  value={`${data.database.connections.current}/${data.database.connections.max || '—'}`}
+                  tone={
+                    data.database.connections.max > 0 &&
+                    data.database.connections.current / data.database.connections.max > 0.8
+                      ? 'warn'
+                      : undefined
+                  }
+                  hint={`${data.database.connections.running} running`}
+                />
+              </div>
+
+              <div className="mt-4 overflow-x-auto">
+                <table className="w-full min-w-[520px]">
+                  <thead className="border-b border-white/10">
+                    <tr>
+                      <th className={TH}>Table</th>
+                      <th className={TH}>Est. rows</th>
+                      <th className={TH}>Data</th>
+                      <th className={TH}>Index</th>
+                      <th className={TH}>Total</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.database.tables.slice(0, 10).map((table) => (
+                      <tr key={table.name} className="border-b border-white/5 last:border-0">
+                        <td className={`${TD} font-mono text-xs text-ink`}>{table.name}</td>
+                        <td className={`${TD} tabular-nums text-muted`}>{table.rows.toLocaleString()}</td>
+                        <td className={`${TD} tabular-nums text-muted`}>{formatBytes(table.dataBytes)}</td>
+                        <td className={`${TD} tabular-nums text-muted`}>{formatBytes(table.indexBytes)}</td>
+                        <td className={`${TD} tabular-nums text-ink`}>{formatBytes(table.totalBytes)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <p className="mt-2 text-[11px] text-muted">
+                Row counts are InnoDB estimates; sizes are exact. {data.media?.objectStorage
+                  ? 'Post media is stored in Vercel Blob, not MariaDB.'
+                  : 'Post media is falling back to MariaDB until object storage is connected.'}
+              </p>
+            </Panel>
+          )}
 
           {data.calls.recent.length > 0 && (
             <Panel title="Recent calls" hint="Newest first · room reports since the last restart">

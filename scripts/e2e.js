@@ -93,7 +93,7 @@ async function launchBrowser() {
 }
 
 async function join(page, profile) {
-  await page.goto(FORCE_RELAY ? `${MATCH}/?relay=1` : MATCH, { waitUntil: 'load', timeout: 20000 });
+  await page.goto(FORCE_RELAY ? `${MATCH}?relay=1` : MATCH, { waitUntil: 'load', timeout: 20000 });
   await page.waitForSelector('#username', { timeout: 10000 });
   await page.type('#username', profile.username);
   await page.select('#age', String(profile.age));
@@ -508,7 +508,7 @@ async function main() {
     pageC.on('pageerror', (e) => consoleErrors.push('C pageerror: ' + e.message));
 
     const accName = `e2e_${Date.now().toString(36)}`;
-    await pageC.goto(FORCE_RELAY ? `${MATCH}/?relay=1` : MATCH, { waitUntil: 'load', timeout: 20000 });
+    await pageC.goto(FORCE_RELAY ? `${MATCH}?relay=1` : MATCH, { waitUntil: 'load', timeout: 20000 });
     await pageC.waitForSelector('#username', { timeout: 10000 });
     await pageC.type('#username', accName);
     await pageC.type('#password', 'e2e-password-123');

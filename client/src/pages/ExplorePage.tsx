@@ -13,6 +13,9 @@ import type { PageProps } from '../shell/pageProps';
 import type { Post } from '../types/social';
 import { SocialError, formatKes, likePost, listPosts, timeAgo } from '../lib/social';
 import { Link, navigate } from '../lib/router';
+import { mediaSrc } from '../lib/mediaUrl';
+import MediaImg from '../components/MediaImg';
+import CreatorActions from '../components/CreatorActions';
 import {
   CommentIcon,
   GlobeIcon,
@@ -275,7 +278,14 @@ export default function ExplorePage({
         <>
           <div className="grid gap-4 sm:grid-cols-2">
             {visible.map((post) => (
-              <ExploreCard key={post.id} post={post} onLike={toggleLike} />
+              <ExploreCard
+                key={post.id}
+                post={post}
+                account={account}
+                config={config}
+                requireAuth={requireAuth}
+                onLike={toggleLike}
+              />
             ))}
           </div>
           <div className="flex justify-center">
@@ -361,13 +371,23 @@ export default function ExplorePage({
 
 interface CardProps {
   post: Post;
+  account: PageProps['account'];
+  config: PageProps['config'];
+  requireAuth: PageProps['requireAuth'];
   onLike: (post: Post) => void;
 }
 
 /** Compact result tile — same paywall rules as the feed, half the height. */
-function ExploreCard({ post, onLike }: CardProps) {
+function ExploreCard({ post, account, config, requireAuth, onLike }: CardProps) {
   const locked = post.price > 0 && !post.owned;
   const hasMedia = (post.type === 'image' || post.type === 'video') && post.mediaUrl;
+  const showActions = !post.creatorBanned && account?.id !== post.creatorId;
+  const offer = post.creatorSubscription ?? {
+    enabled: false,
+    price: 0,
+    currency: post.currency,
+    periodDays: 30,
+  };
 
   return (
     <article
@@ -384,8 +404,30 @@ function ExploreCard({ post, onLike }: CardProps) {
           </span>
         </span>
         <div className="min-w-0 flex-1">
-          <p className="truncate text-sm font-semibold text-ink">@{post.creatorName}</p>
+          <Link
+            to={`/creator/${post.creatorId}`}
+            onClick={(event) => event.stopPropagation()}
+            className="block truncate text-sm font-semibold text-ink hover:underline"
+          >
+            @{post.creatorName}
+          </Link>
           <p className="text-xs text-muted">{timeAgo(post.createdAt)}</p>
+          {showActions && (
+            <div className="mt-1.5">
+              <CreatorActions
+                creatorId={post.creatorId}
+                creatorName={post.creatorName}
+                creatorBanned={post.creatorBanned}
+                following={Boolean(post.creatorFollowing)}
+                subscribed={Boolean(post.creatorSubscribed)}
+                offer={offer}
+                account={account}
+                config={config}
+                requireAuth={requireAuth}
+                compact
+              />
+            </div>
+          )}
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
           {post.isAdult && (
@@ -405,16 +447,15 @@ function ExploreCard({ post, onLike }: CardProps) {
       {post.type !== 'text' && (
         <div className="mt-3">
           {hasMedia && post.type === 'image' && (
-            <img
-              src={post.mediaUrl as string}
+            <MediaImg
+              src={mediaSrc(post.mediaUrl)}
               alt={post.caption || 'Post image'}
-              loading="lazy"
               className="photo max-h-52 w-full"
             />
           )}
           {hasMedia && post.type === 'video' && (
             <video
-              src={post.mediaUrl as string}
+              src={mediaSrc(post.mediaUrl)}
               preload="metadata"
               muted
               playsInline

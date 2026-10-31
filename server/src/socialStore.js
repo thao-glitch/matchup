@@ -41,6 +41,7 @@ function mapPost(row) {
     creatorId: Number(row.account_id),
     creatorName: row.username,
     creatorCountry: row.country || '',
+    creatorBanned: Boolean(row.creator_banned),
     type: row.type,
     caption: row.caption || '',
     mediaKey: row.media_key || null,
@@ -72,6 +73,8 @@ function mapCharge(row) {
     currency: row.currency || 'KES',
     commission: num(row.commission),
     net: num(row.net),
+    premiumDays: row.premium_days == null ? null : Number(row.premium_days),
+    periodDays: row.period_days == null ? null : Number(row.period_days),
     status: row.status,
     checkoutRequestId: row.checkout_request_id || null,
     mpesaRef: row.mpesa_receipt || null,
@@ -179,7 +182,7 @@ async function insertPost({
 
 async function getPost(id, { withCountry = true } = {}) {
   const rows = await query(
-    `SELECT p.*, ${withCountry ? 'a.country AS country,' : ''}
+    `SELECT p.*, ${withCountry ? 'a.country AS country, a.banned_at AS creator_banned,' : ''}
             (SELECT COUNT(*) FROM post_likes l WHERE l.post_id = p.id) AS like_count,
             (SELECT COUNT(*) FROM post_comments c WHERE c.post_id = p.id AND c.status = 'active') AS comment_count
        FROM posts p
@@ -244,7 +247,7 @@ async function listPosts({
     params,
   );
   const rows = await query(
-    `SELECT p.*, a.country AS country,
+    `SELECT p.*, a.country AS country, a.banned_at AS creator_banned,
             (SELECT COUNT(*) FROM post_likes l WHERE l.post_id = p.id) AS like_count,
             (SELECT COUNT(*) FROM post_comments c WHERE c.post_id = p.id AND c.status = 'active') AS comment_count
        FROM posts p
@@ -277,17 +280,58 @@ async function decorateForViewer(posts, accountId, adultOk = false) {
     const claim = p.price > 0 && accountId ? `?t=${mediaToken.mint(p.id, accountId, adultOk)}` : '';
     return `/api/posts/${p.id}/media${claim}`;
   };
+  const creatorIds = [...new Set(posts.map((p) => Number(p.creatorId)))].filter(Boolean);
+  const creatorPlaceholders = creatorIds.map(() => '?').join(',');
+  const [offers, followingRows] = await Promise.all([
+    creatorIds.length
+      ? query(
+          `SELECT account_id, enabled, price, currency, period_days
+             FROM creator_subs WHERE account_id IN (${creatorPlaceholders})`,
+          creatorIds,
+        )
+      : Promise.resolve([]),
+    accountId && creatorIds.length
+      ? query(
+          `SELECT creator_id FROM follows
+            WHERE follower_id = ? AND creator_id IN (${creatorPlaceholders})`,
+          [accountId, ...creatorIds],
+        )
+      : Promise.resolve([]),
+  ]);
+  const offerMap = new Map(
+    offers.map((row) => [
+      Number(row.account_id),
+      {
+        enabled: Boolean(row.enabled),
+        price: num(row.price),
+        currency: row.currency || 'KES',
+        periodDays: Number(row.period_days) || 30,
+      },
+    ]),
+  );
+  const followingSet = new Set(followingRows.map((r) => Number(r.creator_id)));
+  const defaultOffer = { enabled: false, price: 0, currency: 'KES', periodDays: 30 };
+  const annotateCreator = (p, extra) => ({
+    ...p,
+    creatorFollowing: followingSet.has(Number(p.creatorId)),
+    creatorSubscribed: Boolean(extra.creatorSubscribed),
+    creatorSubscription: offerMap.get(Number(p.creatorId)) || defaultOffer,
+    ...extra,
+  });
+
   if (!accountId) {
-    return posts.map((p) => ({
-      ...p,
-      liked: false,
-      owned: p.price <= 0,
-      mediaUrl: urlFor(p, p.price <= 0),
-    }));
+    return posts.map((p) =>
+      annotateCreator(p, {
+        creatorSubscribed: false,
+        liked: false,
+        owned: p.price <= 0,
+        mediaUrl: urlFor(p, p.price <= 0),
+      }),
+    );
   }
   const ids = posts.map((p) => p.id);
   const placeholders = ids.map(() => '?').join(',');
-  const [likes, owned] = await Promise.all([
+  const [likes, owned, subscribed] = await Promise.all([
     query(
       `SELECT post_id FROM post_likes WHERE account_id = ? AND post_id IN (${placeholders})`,
       [accountId, ...ids],
@@ -298,6 +342,7 @@ async function decorateForViewer(posts, accountId, adultOk = false) {
           AND ref_id IN (${placeholders})`,
       [accountId, ...ids],
     ),
+    activeSubscriptionCreatorIds(accountId),
   ]);
   const likedSet = new Set(likes.map((r) => Number(r.post_id)));
   const ownedSet = new Set(owned.map((r) => Number(r.ref_id)));
@@ -305,14 +350,18 @@ async function decorateForViewer(posts, accountId, adultOk = false) {
     // The creator owns their work by definition — the detail route has always
     // said so; without it here a creator's own priced post renders locked on
     // their own profile (and withholds its thumbnail).
+    const creatorSubscribed = subscribed.has(Number(p.creatorId));
     const owned =
-      p.price <= 0 || Number(p.creatorId) === Number(accountId) || ownedSet.has(p.id);
-    return {
-      ...p,
+      p.price <= 0 ||
+      Number(p.creatorId) === Number(accountId) ||
+      ownedSet.has(p.id) ||
+      creatorSubscribed;
+    return annotateCreator(p, {
       liked: likedSet.has(p.id),
       owned,
       mediaUrl: urlFor(p, owned),
-    };
+      creatorSubscribed,
+    });
   });
 }
 
@@ -390,12 +439,14 @@ async function insertCharge({
   currency,
   commission,
   net,
+  premiumDays = null,
+  periodDays = null,
 }) {
   const res = await query(
     `INSERT INTO charges
        (purpose, ref_id, buyer_account_id, buyer_username, payee_account_id,
-        payee_username, phone, amount, currency, commission, net)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        payee_username, phone, amount, currency, commission, net, premium_days, period_days)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       purpose,
       Number(refId),
@@ -408,6 +459,8 @@ async function insertCharge({
       currency,
       num(commission),
       num(net),
+      premiumDays == null ? null : Math.max(0, Math.trunc(Number(premiumDays))),
+      periodDays == null ? null : Math.max(1, Math.trunc(Number(periodDays))),
     ],
   );
   return getCharge(res.insertId);
@@ -438,7 +491,25 @@ async function findOpenCharge({ purpose, refId, buyerId }) {
   return mapCharge(rows[0]);
 }
 
-/** Has this buyer already paid for this thing? The entitlement check. */
+/** One buyer's own charges for one purpose — their receipt history. */
+async function listChargesForBuyer({ purpose, buyerId, size = 10 } = {}) {
+  const limit = pageSize(size, 10);
+  const rows = await query(
+    `SELECT * FROM charges
+      WHERE purpose = ? AND buyer_account_id = ?
+      ORDER BY id DESC LIMIT ${limit}`,
+    [purpose, Number(buyerId)],
+  );
+  return rows.map(mapCharge);
+}
+
+/**
+ * Has this buyer already paid for this thing? The entitlement check.
+ *
+ * Posts also unlock through an active creator subscription — that is the
+ * subscription's whole benefit. Rooms and premium stay charge-only: a
+ * subscription buys a creator's posts, not their live rooms.
+ */
 async function isEntitled({ purpose, refId, accountId }) {
   const rows = await query(
     `SELECT 1 FROM charges
@@ -446,7 +517,18 @@ async function isEntitled({ purpose, refId, accountId }) {
       LIMIT 1`,
     [purpose, Number(refId), Number(accountId)],
   );
-  return rows.length > 0;
+  if (rows.length > 0) return true;
+  if (purpose !== 'post') return false;
+  const sub = await query(
+    `SELECT 1 FROM subscriptions s
+       JOIN posts p ON p.account_id = s.creator_id
+      WHERE p.id = ? AND s.subscriber_id = ?
+        AND s.status IN ('active', 'canceled')
+        AND (s.expires_at IS NULL OR s.expires_at > NOW())
+      LIMIT 1`,
+    [Number(refId), Number(accountId)],
+  );
+  return sub.length > 0;
 }
 
 /** Many refs at once — powers the feed's `owned` flag without N queries. */
@@ -572,6 +654,211 @@ async function chargeSummary({ days = 30 } = {}) {
       gross: num(r.gross),
       commission: num(r.commission),
     })),
+  };
+}
+
+// ── Follows + creator subscriptions ──────────────────────────────────────────
+
+function mapCreatorSub(row) {
+  return {
+    enabled: Boolean(row?.enabled),
+    price: row ? num(row.price) : 0,
+    currency: row?.currency || 'KES',
+    periodDays: row ? Number(row.period_days) || 30 : 30,
+    perk: row?.perk || '',
+  };
+}
+
+function mapSubscription(row) {
+  if (!row) return null;
+  return {
+    id: Number(row.id),
+    subscriberId: Number(row.subscriber_id),
+    creatorId: Number(row.creator_id),
+    status: row.status,
+    price: num(row.price),
+    currency: row.currency || 'KES',
+    periodDays: Number(row.period_days) || 30,
+    chargeId: row.charge_id == null ? null : Number(row.charge_id),
+    startedAt: iso(row.started_at),
+    expiresAt: iso(row.expires_at),
+    canceledAt: iso(row.canceled_at),
+  };
+}
+
+/** The creator's offer — defaults to "subscriptions off" when never set. */
+async function getCreatorSub(accountId) {
+  const rows = await query('SELECT * FROM creator_subs WHERE account_id = ? LIMIT 1', [
+    Number(accountId),
+  ]);
+  return mapCreatorSub(rows[0]);
+}
+
+async function putCreatorSub(accountId, patch = {}) {
+  const current = await getCreatorSub(accountId);
+  const enabled = patch.enabled === undefined ? current.enabled : Boolean(patch.enabled);
+  const price = patch.price === undefined ? current.price : Math.max(0, num(patch.price));
+  const currency = String(patch.currency || current.currency || 'KES').slice(0, 3).toUpperCase();
+  const periodDays =
+    patch.periodDays === undefined
+      ? current.periodDays
+      : Math.min(365, Math.max(1, Math.trunc(Number(patch.periodDays) || 30)));
+  const perk =
+    patch.perk === undefined ? current.perk : String(patch.perk || '').trim().slice(0, 160);
+  await query(
+    `INSERT INTO creator_subs (account_id, enabled, price, currency, period_days, perk)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON DUPLICATE KEY UPDATE
+       enabled = VALUES(enabled), price = VALUES(price), currency = VALUES(currency),
+       period_days = VALUES(period_days), perk = VALUES(perk)`,
+    [Number(accountId), enabled ? 1 : 0, price, currency, periodDays, perk],
+  );
+  return getCreatorSub(accountId);
+}
+
+/** One subscriber/creator pair — the row survives renewal and cancellation. */
+async function getSubscription(subscriberId, creatorId) {
+  const rows = await query(
+    'SELECT * FROM subscriptions WHERE subscriber_id = ? AND creator_id = ? LIMIT 1',
+    [Number(subscriberId), Number(creatorId)],
+  );
+  return mapSubscription(rows[0]);
+}
+
+/** Creator ids this account currently subscribes to (feed entitlement). */
+async function activeSubscriptionCreatorIds(accountId) {
+  const rows = await query(
+    `SELECT creator_id FROM subscriptions
+      WHERE subscriber_id = ? AND status IN ('active', 'canceled')
+        AND (expires_at IS NULL OR expires_at > NOW())`,
+    [Number(accountId)],
+  );
+  return new Set(rows.map((r) => Number(r.creator_id)));
+}
+
+/**
+ * Create or renew a subscription.
+ *
+ * A renewal extends from whichever is later — now or the current expiry — so
+ * paying early never burns the remaining days. `charge_id` points at the
+ * receipt for a paid period (null for a free subscription).
+ */
+async function activateSubscription({
+  subscriberId,
+  creatorId,
+  chargeId = null,
+  price = 0,
+  currency = 'KES',
+  periodDays = 30,
+}) {
+  const period = Math.min(365, Math.max(1, Math.trunc(Number(periodDays) || 30)));
+  await query(
+    `INSERT INTO subscriptions
+       (subscriber_id, creator_id, status, price, currency, period_days, charge_id, started_at, expires_at)
+     VALUES (?, ?, 'active', ?, ?, ?, ?, NOW(), DATE_ADD(NOW(), INTERVAL ${period} DAY))
+     ON DUPLICATE KEY UPDATE
+       status = 'active',
+       price = VALUES(price),
+       currency = VALUES(currency),
+       period_days = VALUES(period_days),
+       charge_id = VALUES(charge_id),
+       started_at = IF(status = 'active' AND expires_at IS NOT NULL AND expires_at > NOW(), started_at, NOW()),
+       expires_at = DATE_ADD(GREATEST(NOW(), COALESCE(expires_at, NOW())), INTERVAL ${period} DAY),
+       canceled_at = NULL`,
+    [
+      Number(subscriberId),
+      Number(creatorId),
+      num(price),
+      currency,
+      period,
+      chargeId == null ? null : Number(chargeId),
+    ],
+  );
+  return getSubscription(subscriberId, creatorId);
+}
+
+/** Cancel renewal; access stays until `expires_at` (the entitlement query). */
+async function cancelSubscription(subscriberId, creatorId) {
+  await query(
+    `UPDATE subscriptions
+        SET status = 'canceled', canceled_at = NOW()
+      WHERE subscriber_id = ? AND creator_id = ? AND status = 'active'`,
+    [Number(subscriberId), Number(creatorId)],
+  );
+  return getSubscription(subscriberId, creatorId);
+}
+
+/** Follow/unfollow is idempotent — double taps cannot create duplicates. */
+async function followCreator(followerId, creatorId, follow = true) {
+  if (follow) {
+    await query('INSERT IGNORE INTO follows (follower_id, creator_id) VALUES (?, ?)', [
+      Number(followerId),
+      Number(creatorId),
+    ]);
+  } else {
+    await query('DELETE FROM follows WHERE follower_id = ? AND creator_id = ?', [
+      Number(followerId),
+      Number(creatorId),
+    ]);
+  }
+  const rows = await query('SELECT COUNT(*) AS n FROM follows WHERE creator_id = ?', [
+    Number(creatorId),
+  ]);
+  return { following: Boolean(follow), followers: Number(rows[0]?.n) || 0 };
+}
+
+/** Public creator card: profile, audience counts, offer and this viewer's state. */
+async function getCreator(creatorId, viewerId = null) {
+  const id = Number(creatorId);
+  if (!Number.isInteger(id) || id <= 0) return null;
+  const rows = await query(
+    `SELECT a.id, a.username, a.country, a.created_at, a.banned_at,
+            (SELECT COUNT(*) FROM follows f WHERE f.creator_id = a.id) AS followers,
+            (SELECT COUNT(*) FROM follows f WHERE f.follower_id = a.id) AS following,
+            (SELECT COUNT(*) FROM posts p WHERE p.account_id = a.id AND p.status = 'active') AS posts,
+            (SELECT COUNT(*) FROM subscriptions s
+              WHERE s.creator_id = a.id AND s.status IN ('active', 'canceled')
+                AND (s.expires_at IS NULL OR s.expires_at > NOW())) AS subscribers
+       FROM accounts a
+      WHERE a.id = ?
+      LIMIT 1`,
+    [id],
+  );
+  const row = rows[0];
+  if (!row) return null;
+
+  const [offer, followingRows, subscription] = await Promise.all([
+    getCreatorSub(id),
+    viewerId
+      ? query('SELECT 1 FROM follows WHERE follower_id = ? AND creator_id = ? LIMIT 1', [
+          Number(viewerId),
+          id,
+        ])
+      : Promise.resolve([]),
+    viewerId ? getSubscription(viewerId, id) : Promise.resolve(null),
+  ]);
+  const active =
+    Boolean(subscription) &&
+    ['active', 'canceled'].includes(subscription.status) &&
+    (!subscription.expiresAt || Date.parse(subscription.expiresAt) > Date.now());
+
+  return {
+    id: Number(row.id),
+    username: row.username,
+    country: row.country || '',
+    banned: Boolean(row.banned_at),
+    createdAt: iso(row.created_at),
+    followers: Number(row.followers) || 0,
+    following: Number(row.following) || 0,
+    posts: Number(row.posts) || 0,
+    subscribers: Number(row.subscribers) || 0,
+    subscription: offer,
+    viewer: {
+      isSelf: Number(viewerId) === id,
+      following: followingRows.length > 0,
+      subscribed: active,
+      subscription,
+    },
   };
 }
 
@@ -894,6 +1181,7 @@ module.exports = {
   getCharge,
   getChargeByCheckout,
   findOpenCharge,
+  listChargesForBuyer,
   isEntitled,
   entitledRefIds,
   markChargePaid,
@@ -911,6 +1199,15 @@ module.exports = {
   settleWithdrawal,
   adjustWallet,
   walletStats,
+  // follows + creator subscriptions
+  getCreator,
+  getCreatorSub,
+  putCreatorSub,
+  followCreator,
+  getSubscription,
+  activeSubscriptionCreatorIds,
+  activateSubscription,
+  cancelSubscription,
   // rooms
   insertRoom,
   getRoomById,

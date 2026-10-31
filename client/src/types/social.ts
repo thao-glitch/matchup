@@ -11,6 +11,13 @@ export interface Post {
   creatorId: number;
   creatorName: string;
   creatorCountry: string;
+  /** Banned creators are hidden from the action row; the server refuses too. */
+  creatorBanned?: boolean;
+  /** Viewer-specific follow state, annotated by the feed/detail endpoints. */
+  creatorFollowing?: boolean;
+  creatorSubscribed?: boolean;
+  /** The creator's current offer, so a post can subscribe without a detour. */
+  creatorSubscription?: CreatorSubscriptionOffer;
   type: 'image' | 'video' | 'link' | 'text';
   caption: string;
   /** `/api/posts/<id>/media` when the viewer may see it, otherwise null. */
@@ -46,22 +53,24 @@ export interface Paged<T> {
   size: number;
 }
 
-/** One STK push / manual payment request. `pending` → poll until it moves. */
+/** One STK push — `pending` → the phone has the prompt up; poll until it moves. */
 export interface Charge {
   id: number;
-  purpose: 'post' | 'room';
+  purpose: 'post' | 'room' | 'premium' | 'sub';
   refId: number;
   amount: number;
   currency: string;
   commission: number;
   net: number;
+  /** `premium` only: the period stamped onto the charge when it was opened. */
+  premiumDays: number | null;
+  /** `sub` only: the subscription period quoted when the prompt was opened. */
+  periodDays: number | null;
   status: 'pending' | 'paid' | 'failed' | 'expired';
   phone: string;
   mpesaRef: string | null;
   checkoutRequestId: string | null;
   error: string | null;
-  /** Manual mode only: paybill + reference the payer must use. */
-  instructions: string | null;
   createdAt: string;
   paidAt: string | null;
 }
@@ -129,16 +138,65 @@ export interface CommerceConfig {
   minPrice: number;
   maxPrice: number;
   currency: string;
-  /** `stk` = Daraja prompt for the PIN, `manual` = paybill + owner approval. */
-  payMode: 'stk' | 'manual';
-  paybill: string;
+  /**
+   * Whether Daraja can actually take money right now (credentials + shortcode
+   * + passkey all present). Every payment is an STK push, so this decides
+   * whether a Pay button can promise a prompt at all.
+   */
+  mpesaReady: boolean;
 }
 
-/** Payment inputs shared by the pay sheet for posts and room entry alike. */
+/** Payment inputs shared by the pay sheet for posts, rooms and subscriptions. */
 export interface PayTarget {
-  purpose: 'post' | 'room';
+  purpose: 'post' | 'room' | 'sub';
   refId: number;
   amount: number;
   currency: string;
   title: string;
+  /** `sub` only: shown as "for N days" under the amount. */
+  periodDays?: number;
+}
+
+/** What a creator charges for access — `enabled: false` means no subscribers. */
+export interface CreatorSubscriptionOffer {
+  enabled: boolean;
+  price: number;
+  currency: string;
+  periodDays: number;
+  perk: string;
+}
+
+/** One subscriber/creator pair; renewals extend `expiresAt` in place. */
+export interface Subscription {
+  id: number;
+  subscriberId: number;
+  creatorId: number;
+  status: 'active' | 'canceled' | 'expired';
+  price: number;
+  currency: string;
+  periodDays: number;
+  chargeId: number | null;
+  startedAt: string;
+  expiresAt: string | null;
+  canceledAt: string | null;
+}
+
+/** The public creator card behind `/creator/:id`. */
+export interface Creator {
+  id: number;
+  username: string;
+  country: string;
+  banned: boolean;
+  createdAt: string;
+  followers: number;
+  following: number;
+  posts: number;
+  subscribers: number;
+  subscription: CreatorSubscriptionOffer;
+  viewer: {
+    isSelf: boolean;
+    following: boolean;
+    subscribed: boolean;
+    subscription: Subscription | null;
+  };
 }

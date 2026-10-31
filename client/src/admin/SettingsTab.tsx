@@ -1,26 +1,28 @@
 /**
- * Settings — the owner's configuration form: payment instructions, the
+ * Settings — the owner's configuration form: the premium subscription, the
  * feature switches that shape the whole app, the social-platform economy
  * (commerce) and the Daraja M-PESA credentials.
  *
- * Saving follows the API contract strictly: only the sections (and within
- * `payment`, only the keys) that actually changed are PUT. The server merges
- * partial patches against its current values, so sending just `{"paybill":…}`
+ * Saving follows the API contract strictly: only the sections (and within a
+ * section, only the keys) that actually changed are PUT. The server merges
+ * partial patches against its current values, so sending just `{"shortcode":…}`
  * both minimizes the payload and protects a second admin's concurrent edit of
  * a different field from being clobbered by a stale full-document write.
  *
- * The account-format preview matters because it is user-visible copy: the
- * format is a template (`MU{id}`) rendered for every buyer, and the preview
- * mirrors the server's `renderAccountNo()` so what the admin sees here is
- * exactly what the payer will be asked to type.
+ * Every payment on the platform is an STK push, so the M-PESA section is the
+ * one that decides whether money can be taken at all — hence the "Test
+ * connection" button, which reports each requirement separately and can fire
+ * a real KES 1 prompt at a phone you choose.
  */
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import {
   errorMessage,
   formatKes,
   request,
+  testMpesa,
   type CommerceSettings,
   type FeatureFlags,
+  type MpesaCheck,
   type MpesaSettings,
   type PaymentSettings,
   type SettingsBundle,
@@ -31,9 +33,6 @@ import { ErrorBanner, Loading, Panel, Pill, Toggle } from './ui';
  *  not force `0` into state while the admin is mid-edit. */
 interface PaymentForm {
   enabled: boolean;
-  bank: string;
-  paybill: string;
-  accountFormat: string;
   amount: string;
   currency: string;
   productName: string;
@@ -64,15 +63,13 @@ interface CommerceForm {
 
 interface MpesaForm {
   enabled: boolean;
-  mode: 'stk' | 'manual';
   consumerKey: string;
   consumerSecret: string;
   shortcode: string;
+  shortcodeType: 'paybill' | 'till';
   passkey: string;
   baseUrl: string;
   callbackUrl: string;
-  paybill: string;
-  accountFormat: string;
   description: string;
 }
 
@@ -80,11 +77,6 @@ interface MpesaForm {
  *  value when a masked string is written back — so an untouched password
  *  input round-trips safely, and the mask must never be "completed" with a
  *  guess. */
-
-const MPESA_MODES: { id: MpesaSettings['mode']; label: string; hint: string }[] = [
-  { id: 'stk', label: 'STK push', hint: 'Prompts the phone for the M-PESA PIN; the callback settles charges automatically.' },
-  { id: 'manual', label: 'Manual', hint: 'Paybill + owner approval in Earnings — needs no Daraja credentials at all.' },
-];
 
 /** One-line explanations shown under each switch. `maintenance` is flagged
  *  dangerous: it stops matchmaking for everyone the moment it is saved. */
@@ -110,6 +102,10 @@ export default function SettingsTab() {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** The Daraja self-check: the checks last run, if any. */
+  const [testPhone, setTestPhone] = useState('');
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<{ ok: boolean; checks: MpesaCheck[] } | null>(null);
 
   useEffect(() => {
     let disposed = false;
@@ -188,10 +184,6 @@ export default function SettingsTab() {
       setError('Premium days must be a whole number between 1 and 3650.');
       return;
     }
-    if (!form.accountFormat.trim()) {
-      setError('The account-number format cannot be empty.');
-      return;
-    }
     if (!Number.isFinite(rate) || rate < 0 || rate > 50) {
       setError('The commission rate must be a whole percentage between 0 and 50.');
       return;
@@ -255,38 +247,40 @@ export default function SettingsTab() {
     setCommerceForm(toCommerceForm(remote.commerce));
     setMpesaForm(toMpesaForm(remote.mpesa));
     setError(null);
+    setTestResult(null);
+  };
+
+  /**
+   * Ask Daraja what is actually wrong.
+   *
+   * The endpoint reads the SAVED configuration, not this form — so an
+   * unsaved edit is not what gets tested. That is deliberate: testing values
+   * that only exist in the browser would report "working" for a setup the
+   * server cannot actually use.
+   */
+  const runTest = async () => {
+    setTesting(true);
+    setError(null);
+    setTestResult(null);
+    try {
+      const phone = testPhone.trim();
+      setTestResult(await testMpesa(phone || undefined));
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setTesting(false);
+    }
   };
 
   return (
     <div className="space-y-4">
       <ErrorBanner message={error} onDismiss={() => setError(null)} />
 
-      <Panel title="Payment" hint="Everything the lobby shows a buyer before they pay.">
+      <Panel
+        title="Premium subscription"
+        hint="What a buyer is charged when their phone prompts them for the M-PESA PIN."
+      >
         <div className="grid gap-4 sm:grid-cols-2">
-          <Field label="Paybill number">
-            <input
-              className="field"
-              value={form.paybill}
-              inputMode="numeric"
-              placeholder="247247"
-              onChange={(event) => setPayment('paybill', event.target.value)}
-            />
-          </Field>
-
-          <Field label="Account-number format">
-            <input
-              className="field font-mono"
-              value={form.accountFormat}
-              placeholder="MU{id}"
-              onChange={(event) => setPayment('accountFormat', event.target.value)}
-            />
-            {/* Live preview with a sample account — the template's braces are
-                the kind of typo nobody catches in a saved-settings screen. */}
-            <p className="mt-1.5 text-xs text-muted">
-              Preview: <span className="font-mono font-semibold text-ink">{previewAccountNo(form.accountFormat)}</span>
-            </p>
-          </Field>
-
           <Field label="Price in KES">
             <input
               className="field"
@@ -307,15 +301,6 @@ export default function SettingsTab() {
               inputMode="numeric"
               value={form.premiumDays}
               onChange={(event) => setPayment('premiumDays', event.target.value)}
-            />
-          </Field>
-
-          <Field label="Bank name">
-            <input
-              className="field"
-              value={form.bank}
-              placeholder="Diamond Trust Bank (DTB)"
-              onChange={(event) => setPayment('bank', event.target.value)}
             />
           </Field>
 
@@ -360,8 +345,8 @@ export default function SettingsTab() {
           <Toggle
             checked={form.enabled}
             onChange={(next) => setPayment('enabled', next)}
-            label="Payments enabled"
-            hint="Show the paywall and payment instructions in the app."
+            label="Premium enabled"
+            hint="Show the pay button in the app."
           />
         </div>
       </Panel>
@@ -466,36 +451,18 @@ export default function SettingsTab() {
 
       <Panel
         title="M-PESA (Daraja)"
-        hint="How paid posts and room entry collect money. Callback URL must be the public https://<host>/api/mpesa/callback. Secrets arrive masked and are kept when saved untouched."
+        hint="Every payment on the platform is an STK push: the buyer's phone prompts for the PIN and the callback settles the charge. Callback URL must be the public https://<host>/api/mpesa/callback. Secrets arrive masked and are kept when saved untouched."
       >
         <div className="mt-3">
           <Toggle
             checked={mpesaForm.enabled}
             onChange={(next) => setMpesa('enabled', next)}
             label="M-PESA payments"
-            hint="Off, and every paywall button says payments are disabled."
+            hint="Off, and every pay button says payments are disabled."
           />
         </div>
 
         <div className="mt-4 grid gap-4 sm:grid-cols-2">
-          <Field
-            label="Payment mode"
-            hint={MPESA_MODES.find((mode) => mode.id === mpesaForm.mode)?.hint}
-            className="sm:col-span-2"
-          >
-            <select
-              className="field"
-              value={mpesaForm.mode}
-              onChange={(event) => setMpesa('mode', event.target.value === 'manual' ? 'manual' : 'stk')}
-            >
-              {MPESA_MODES.map((mode) => (
-                <option key={mode.id} value={mode.id}>
-                  {mode.id === 'stk' ? 'STK push — prompts the phone for the PIN' : 'Manual — paybill + owner approval'}
-                </option>
-              ))}
-            </select>
-          </Field>
-
           <Field label="Consumer key" hint="Daraja — masked on read; saving keeps the stored value.">
             <input
               className="field font-mono"
@@ -516,16 +483,47 @@ export default function SettingsTab() {
             />
           </Field>
 
-          <Field label="Shortcode" hint="e.g. 174379 in the sandbox.">
+          <Field
+            label="Shortcode"
+            hint={
+              mpesaForm.shortcode
+                ? 'Bills the buyer; settle its balance to your own M-PESA number on Safaricom’s side.'
+                : 'Required — Safaricom rejects an STK push without one. Register a Paybill and tell ' +
+                  'Safaricom to settle it to your M-PESA number: that is what makes your number the ' +
+                  'one that receives the cash. The sandbox uses 174379.'
+            }
+          >
             <input
               className="field font-mono"
               inputMode="numeric"
+              placeholder="174379"
               value={mpesaForm.shortcode}
               onChange={(event) => setMpesa('shortcode', event.target.value)}
             />
           </Field>
 
-          <Field label="Passkey" hint="Daraja — masked on read; saving keeps the stored value.">
+          <Field
+            label="Shortcode type"
+            hint={
+              mpesaForm.shortcodeType === 'till'
+                ? 'Prompts go out as CustomerBuyGoodsOnline — what a Buy Goods till expects. Money collects on the till and you withdraw it to your own number from there.'
+                : 'Prompts go out as CustomerPayBillOnline — the Lipa na M-PESA Paybill rail, and the default. Switch to Till if your shortcode is a Buy Goods number: Safaricom rejects the mismatch.'
+            }
+          >
+            <select
+              className="field"
+              aria-label="Shortcode type"
+              value={mpesaForm.shortcodeType}
+              onChange={(event) =>
+                setMpesa('shortcodeType', event.target.value as 'paybill' | 'till')
+              }
+            >
+              <option value="paybill">Paybill (CustomerPayBillOnline)</option>
+              <option value="till">Buy Goods till (CustomerBuyGoodsOnline)</option>
+            </select>
+          </Field>
+
+          <Field label="Passkey" hint="The Lipa na M-PESA Online passkey — issued with the shortcode, not your account password.">
             <input
               className="field font-mono"
               type="password"
@@ -552,24 +550,6 @@ export default function SettingsTab() {
             />
           </Field>
 
-          <Field label="Paybill number (manual mode)" hint="The number creators' buyers pay into; no Daraja account required for manual mode.">
-            <input
-              className="field font-mono"
-              inputMode="numeric"
-              value={mpesaForm.paybill}
-              onChange={(event) => setMpesa('paybill', event.target.value)}
-            />
-          </Field>
-
-          <Field label="Account-number format" hint="Manual-mode reference template, e.g. MU{id}.">
-            <input
-              className="field font-mono"
-              placeholder="MU{id}"
-              value={mpesaForm.accountFormat}
-              onChange={(event) => setMpesa('accountFormat', event.target.value)}
-            />
-          </Field>
-
           <Field label="Description" hint="Statement description shown to the payer.">
             <input
               className="field"
@@ -577,6 +557,64 @@ export default function SettingsTab() {
               onChange={(event) => setMpesa('description', event.target.value)}
             />
           </Field>
+        </div>
+
+        {/* ── The self-check ────────────────────────────────────────────── */}
+        <div className="mt-5 rounded-xl border border-white/10 bg-surface-3/60 p-4">
+          <p className="text-sm font-semibold text-ink">Test the connection</p>
+          <p className="mt-1 text-xs leading-relaxed text-muted">
+            Checks each requirement separately and, with a phone number, fires a real KES 1 prompt
+            at it — the only way Safaricom will validate the shortcode and passkey for you. This
+            reads what is <span className="font-semibold text-ink">saved</span> above, so save first.
+          </p>
+
+          <div className="mt-3 flex flex-wrap items-end gap-2">
+            <div className="min-w-0 flex-1">
+              <label className="label" htmlFor="mpesa-test-phone">
+                Phone (optional)
+              </label>
+              <input
+                id="mpesa-test-phone"
+                className="field"
+                inputMode="tel"
+                placeholder="0712 345 678"
+                value={testPhone}
+                onChange={(event) => setTestPhone(event.target.value)}
+              />
+            </div>
+            <button
+              type="button"
+              className="btn btn-primary px-4 py-2 text-sm"
+              disabled={testing}
+              onClick={() => void runTest()}
+            >
+              {testing ? 'Checking…' : 'Test connection'}
+            </button>
+          </div>
+
+          {testResult && (
+            <ul className="mt-3 space-y-1.5">
+              {testResult.checks.map((check) => (
+                <li key={check.name} className="flex gap-2 text-xs leading-relaxed">
+                  <span
+                    className={
+                      check.ok === true
+                        ? 'text-ok'
+                        : check.ok === false
+                          ? 'text-danger'
+                          : 'text-muted'
+                    }
+                    aria-hidden="true"
+                  >
+                    {check.ok === true ? '✓' : check.ok === false ? '✕' : '·'}
+                  </span>
+                  <span className={check.ok === false ? 'text-danger' : 'text-muted'}>
+                    {check.message}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
       </Panel>
 
@@ -621,9 +659,6 @@ function Field({ label, hint, className = '', children }: { label: string; hint?
 function toForm(payment: PaymentSettings): PaymentForm {
   return {
     enabled: payment.enabled,
-    bank: payment.bank,
-    paybill: payment.paybill,
-    accountFormat: payment.accountFormat,
     amount: String(payment.amount),
     currency: payment.currency,
     productName: payment.productName,
@@ -643,12 +678,6 @@ function diffPayment(form: PaymentForm, remote: PaymentSettings): Partial<Paymen
   const out: Partial<PaymentSettings> = {};
   if (form.enabled !== remote.enabled) out.enabled = form.enabled;
 
-  const bank = form.bank.trim();
-  if (bank !== remote.bank) out.bank = bank;
-  const paybill = form.paybill.trim();
-  if (paybill !== remote.paybill) out.paybill = paybill;
-  const format = form.accountFormat.trim();
-  if (format !== remote.accountFormat) out.accountFormat = format;
   const currency = form.currency.trim().toUpperCase();
   if (currency !== remote.currency) out.currency = currency;
   const productName = form.productName.trim();
@@ -673,16 +702,6 @@ function diffFeatures(next: FeatureFlags, remote: FeatureFlags): Partial<Feature
   return out;
 }
 
-/**
- * Render `accountFormat` for a sample account — the same substitution and
- * character strip the server applies (`settings.renderAccountNo`), so the
- * preview cannot promise something the payment flow will not produce.
- */
-function previewAccountNo(format: string): string {
-  const rendered = format.replace(/\{id\}/g, '1042').replace(/\{username\}/g, 'demo');
-  return rendered.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64) || 'MU1042';
-}
-
 function toCommerceForm(commerce: CommerceSettings): CommerceForm {
   return {
     enabled: commerce.enabled,
@@ -699,15 +718,13 @@ function toCommerceForm(commerce: CommerceSettings): CommerceForm {
 function toMpesaForm(mpesa: MpesaSettings): MpesaForm {
   return {
     enabled: mpesa.enabled,
-    mode: mpesa.mode,
     consumerKey: mpesa.consumerKey,
     consumerSecret: mpesa.consumerSecret,
     shortcode: mpesa.shortcode,
+    shortcodeType: mpesa.shortcodeType,
     passkey: mpesa.passkey,
     baseUrl: mpesa.baseUrl,
     callbackUrl: mpesa.callbackUrl,
-    paybill: mpesa.paybill,
-    accountFormat: mpesa.accountFormat,
     description: mpesa.description,
   };
 }
@@ -742,7 +759,6 @@ function diffCommerce(form: CommerceForm, remote: CommerceSettings): Partial<Com
 function diffMpesa(form: MpesaForm, remote: MpesaSettings): Partial<MpesaSettings> {
   const out: Partial<MpesaSettings> = {};
   if (form.enabled !== remote.enabled) out.enabled = form.enabled;
-  if (form.mode !== remote.mode) out.mode = form.mode;
 
   const consumerKey = form.consumerKey.trim();
   if (consumerKey !== remote.consumerKey) out.consumerKey = consumerKey;
@@ -750,16 +766,13 @@ function diffMpesa(form: MpesaForm, remote: MpesaSettings): Partial<MpesaSetting
   if (consumerSecret !== remote.consumerSecret) out.consumerSecret = consumerSecret;
   const shortcode = form.shortcode.trim();
   if (shortcode !== remote.shortcode) out.shortcode = shortcode;
+  if (form.shortcodeType !== remote.shortcodeType) out.shortcodeType = form.shortcodeType;
   const passkey = form.passkey.trim();
   if (passkey !== remote.passkey) out.passkey = passkey;
   const baseUrl = form.baseUrl.trim();
   if (baseUrl !== remote.baseUrl) out.baseUrl = baseUrl;
   const callbackUrl = form.callbackUrl.trim();
   if (callbackUrl !== remote.callbackUrl) out.callbackUrl = callbackUrl;
-  const paybill = form.paybill.trim();
-  if (paybill !== remote.paybill) out.paybill = paybill;
-  const accountFormat = form.accountFormat.trim();
-  if (accountFormat !== remote.accountFormat) out.accountFormat = accountFormat;
   const description = form.description.trim();
   if (description !== remote.description) out.description = description;
   return out;

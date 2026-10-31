@@ -24,7 +24,10 @@ import {
   timeAgo,
 } from '../lib/social';
 import { Link, navigate } from '../lib/router';
+import { mediaSrc } from '../lib/mediaUrl';
+import MediaImg from '../components/MediaImg';
 import PaySheet from '../components/PaySheet';
+import CreatorActions from '../components/CreatorActions';
 import {
   AlertIcon,
   ArrowLeftIcon,
@@ -274,8 +277,48 @@ export default function PostDetailPage({
             </span>
           </span>
           <div className="min-w-0 flex-1">
-            <p className="truncate text-sm font-semibold text-ink">@{post.creatorName}</p>
+            <Link
+              to={`/creator/${post.creatorId}`}
+              className="block truncate text-sm font-semibold text-ink hover:underline"
+            >
+              @{post.creatorName}
+            </Link>
             <p className="text-xs text-muted">{timeAgo(post.createdAt)}</p>
+            {!post.creatorBanned && account?.id !== post.creatorId && (
+              <div className="mt-2">
+                <CreatorActions
+                  creatorId={post.creatorId}
+                  creatorName={post.creatorName}
+                  creatorBanned={post.creatorBanned}
+                  following={Boolean(post.creatorFollowing)}
+                  subscribed={Boolean(post.creatorSubscribed)}
+                  offer={
+                    post.creatorSubscription ?? {
+                      enabled: false,
+                      price: 0,
+                      currency: post.currency,
+                      periodDays: 30,
+                    }
+                  }
+                  account={account}
+                  config={config}
+                  requireAuth={requireAuth}
+                  onChange={(state) => {
+                    const wasSubscribed = Boolean(post.creatorSubscribed);
+                    setPost((current) =>
+                      current
+                        ? {
+                            ...current,
+                            creatorFollowing: state.following,
+                            creatorSubscribed: state.subscribed,
+                          }
+                        : current,
+                    );
+                    if (state.subscribed && !wasSubscribed) void load();
+                  }}
+                />
+              </div>
+            )}
           </div>
           <div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
             {post.isAdult && (
@@ -303,15 +346,15 @@ export default function PostDetailPage({
         {/* ── Media / paywall ─────────────────────────────────────────────── */}
         <div className="mt-4">
           {showMedia && post.type === 'image' && (
-            <img
-              src={post.mediaUrl as string}
+            <MediaImg
+              src={mediaSrc(post.mediaUrl)}
               alt={post.caption || 'Post image'}
               className="photo max-h-[75vh] w-full rounded-2xl"
             />
           )}
           {showMedia && post.type === 'video' && (
             <video
-              src={post.mediaUrl as string}
+              src={mediaSrc(post.mediaUrl)}
               controls
               playsInline
               preload="metadata"

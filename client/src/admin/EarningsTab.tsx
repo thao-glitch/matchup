@@ -33,7 +33,7 @@ const EARNINGS_DAYS = 30;
 
 /** Empty string = every value (the server treats it as "no filter"). */
 type AnyStatus = '' | 'pending' | 'paid' | 'failed' | 'expired';
-type PurposeFilter = '' | 'post' | 'room';
+type PurposeFilter = '' | 'premium' | 'post' | 'room' | 'sub';
 
 const CHARGE_STATUSES: { id: AnyStatus; label: string }[] = [
   { id: '', label: 'All' },
@@ -45,8 +45,10 @@ const CHARGE_STATUSES: { id: AnyStatus; label: string }[] = [
 
 const PURPOSES: { id: PurposeFilter; label: string }[] = [
   { id: '', label: 'Any purpose' },
+  { id: 'premium', label: 'Premium' },
   { id: 'post', label: 'Posts' },
   { id: 'room', label: 'Rooms' },
+  { id: 'sub', label: 'Subscriptions' },
 ];
 
 interface LedgerParams {
@@ -311,8 +313,9 @@ function ChargesLedger({ onMutated }: { onMutated: () => void }) {
       title="Payments ledger"
       hint={
         <>
-          Every post purchase and room entry. Pending charges are settled manually — approving credits the
-          creator&apos;s wallet.
+          Every payment on the platform — post purchases, room entry and premium. The Daraja
+          callback settles these automatically; the button below is only for a callback that never
+          arrived.
         </>
       }
     >

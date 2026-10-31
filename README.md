@@ -44,11 +44,12 @@ paid group calls and 18+ conferences. Payments run on **M-PESA**: the buyer
 types their phone number, presses Pay and gets a Daraja STK PIN prompt; the
 charge row is both the receipt and the unlock, and the money lands in the
 creator's wallet already split (net to the creator, commission to the house).
-Until Safaricom credentials are entered in **/admin → Settings**, the app runs
-in *manual* mode: paybill + account number, and the owner approves each payment
-from the dashboard. `/admin` also owns commerce switches, commission rate,
-price caps, room moderation, the earnings ledger and payouts. The original 1v1
-video app lives at `/match` — the emphasised centre tab.
+The callback settles every charge the moment the PIN lands, so nothing waits
+on an approval — until Safaricom credentials are entered in **/admin →
+Settings**, pay buttons say so plainly rather than prompting. `/admin` also
+owns commerce switches, commission rate, price caps, room moderation, the
+earnings ledger and payouts. The original 1v1 video app lives at `/match` —
+the emphasised centre tab.
 
 **Guides**: [DEPLOY.md](DEPLOY.md) — run the whole app independently on free
 tiers (no card, no GitHub) · [ADS.md](ADS.md) — show ads *and* run promotion
@@ -111,7 +112,7 @@ matchup/
 │       ├── matchmaking.js            # validation + symmetric match rule
 │       ├── matchmaker.js             # FIFO queue, rooms, signal relay, presence
 │       ├── accounts.js               # register/login/sessions (scrypt, bearer tokens)
-│       ├── payments.js               # premium paybill intents (manual approval)
+│       ├── payments.js               # premium — opens the charge, fires the STK push
 │       ├── commerce.js               # posts, paywall, charges, commission split, wallets, rooms
 │       ├── socialStore.js            # social tables (posts, charges, wallets, rooms…)
 │       ├── mpesa.js                  # Daraja STK push + callback parsing
@@ -125,7 +126,7 @@ matchup/
 │
 ├── scripts/                         # operations + verification
 │   ├── mariadb-init.sql             # one-time: create the database + app user
-│   ├── local.sh                     # start / stop / status the whole stack (incl. tunnel URL sync)
+│   ├── local.sh                     # start / stop / status the local signaling server
 │   ├── turn-up.sh                   # (re)create coturn with production settings
 │   ├── test-signaling.js            # 16 checks against the live server
 │   ├── test-db.js                   # is the app really linked to the database?
@@ -199,6 +200,7 @@ Open **two tabs** on `http://localhost:5173`, fill in two complementary profiles
 | `TWILIO_AUTH_TOKEN`  | alt      | ↑                                                                |
 | `PRESENCE_INTERVAL_MS` | no     | Live counter push interval (default `5000`)                        |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | no | Creates the first `/admin` dashboard login on the very first boot (10+ chars). Ignored afterwards — the dashboard owns its credentials |
+| `BLOB_READ_WRITE_TOKEN` | production | Vercel Blob token. When set, new uploads go to a private Blob store and the browser uploads directly (no function body limit); unset falls back to `media_blobs` in MariaDB. |
 | `MEDIA_TOKEN_SECRET` | no       | Key for the signed `?t=` claims on paid media URLs. Unset ⇒ a random per-boot key (fine for one instance; set it if you scale past one so links survive restarts/instances) |
 | `MEDIA_TOKEN_TTL_MS` | no       | How long a paid-media claim stays valid (default `3600000` = 1h)     |
 
@@ -423,24 +425,26 @@ fixed emoji set), spoofed-room drops, and its own 15/s rate limit so the fun
 channel can never crowd out the SDP relay. No server game state: everything
 shared is derivable from the same events both sides already see.
 
-### 4.8 Admin dashboard & paybill payments
+### 4.8 Admin dashboard & M-PESA payments
 
 Two features that live entirely behind the same process — no extra service:
 
 **`/admin`** — a login-protected dashboard (`server/src/admin.js` +
-`client/src/admin/`): live users and queue, call telemetry, the paybill ledger,
-feature switches (ads / sign-ups / payments / **maintenance**), ban & premium
-controls and an audit trail of every action. Admins live in their own `admins`
-table with their own scrypt hashes and 12-hour sessions — being a user of the
-app can never make you an admin of it.
+`client/src/admin/`): live users and queue, call telemetry, the payments
+ledger, feature switches (ads / sign-ups / payments / **maintenance**), ban &
+premium controls and an audit trail of every action. Admins live in their own
+`admins` table with their own scrypt hashes and 12-hour sessions — being a
+user of the app can never make you an admin of it.
 
-**Paybill payments** (`server/src/payments.js` + `client/src/lib/payments.ts`)
-— a visitor signs in, the lobby shows *their* unique Account Number (`MU1042`)
-plus the paybill number and price you configured, they pay from any bank app or
-M-PESA, press **I have paid**, and you approve the row in `/admin` → Payments.
-Approval stamps premium on the account. Everything (bank, paybill, price,
-premium length, wording) is edited in `/admin` → Settings and applies live.
-Full guide, including what to ask the bank for: [docs/PAYMENTS.md](docs/PAYMENTS.md).
+**M-PESA payments** (`server/src/payments.js` + `client/src/lib/payments.ts`)
+— a visitor signs in, enters their M-PESA number and presses Pay. Daraja
+pushes a PIN prompt to their phone; Safaricom's callback settles the charge,
+and premium (or the post, or the room) opens without anyone approving
+anything. A lost callback is covered by polling Daraja directly. Everything
+(price, premium length, wording, Daraja credentials) is edited in `/admin` →
+Settings and applies live, and **Test connection** there reports exactly which
+credential is still missing. Full guide, including what to ask Safaricom for:
+[docs/PAYMENTS.md](docs/PAYMENTS.md).
 
 Matchmaking enforces all of it: a banned account cannot log in *or* queue
 (username and IP), a `features.maintenance` flip pauses the queue instantly,
@@ -456,8 +460,9 @@ and `GET /api/config` hands the switches to the lobby.
 > be switched off. The sections below cover the classic paths (Render
 > blueprint, TURN, local MariaDB).
 >
-> **Payments → [docs/PAYMENTS.md](docs/PAYMENTS.md)** — accepting money through
-> your DTB paybill, and what to ask the bank for.
+> **Payments → [docs/PAYMENTS.md](docs/PAYMENTS.md)** — accepting money by
+> M-PESA STK push, and what to ask Safaricom for so the cash lands on your
+> own number.
 >
 > **Ads & promotion → [ADS.md](ADS.md)** — AdSense/ad-network setup in the app
 > plus the paid-campaign playbook.
@@ -483,8 +488,10 @@ and `GET /api/config` hands the switches to the lobby.
 
 > **Storing data on your own PC?** Then the signaling server runs here too
 > instead of Render — follow [§5.5](#55-keeping-the-database-on-this-pc-mariadb)
-> and come back only for steps 1–4 below, with
-> `VITE_SIGNALING_URL` set to your **tunnel URL**.
+> and come back only for steps 1–4 below, with `VITE_SIGNALING_URL` set to your
+> API's **permanent public https URL**. The Cloudflare quick tunnel this guide
+> used to wire up has been removed: it mints a new address on every restart, so
+> a client built against it eventually points at a dead host.
 
 1. Vercel → **Add New → Project** → import the repo.
 2. Set **Root Directory** to `client` (Settings → General), framework preset
@@ -505,7 +512,7 @@ repository:
 cd ~/Desktop/matchup/client
 npx vercel login                                  # once per machine (browser opens)
 npx vercel link --yes --project matchup           # create + link the project
-npx vercel env add VITE_SIGNALING_URL production   # paste your tunnel URL
+npx vercel env add VITE_SIGNALING_URL production   # paste your API's public https URL
 npx vercel --prod                                 # first deploy (builds with the URL)
 ```
 
@@ -818,20 +825,26 @@ Then start the app (`cd server && npm start`) — this log line
 and `"store":"maria"` in `curl -s localhost:4000/api/stats` confirm it. The app
 creates its schema itself on first boot — there is nothing else to migrate.
 
-**4. Reach it from the Vercel frontend.** The server needs a public HTTPS URL.
-A tunnel needs no router/port-forwarding configuration and never exposes
-MariaDB:
+**4. Reach it from the Vercel frontend.** The server needs a public HTTPS URL —
+without one the deployed client has no API (it loads, quietly retries, and
+nothing that needs data works). Two ways to get one:
 
 ```bash
-cloudflared tunnel --url http://localhost:4000     # free → prints an https://…trycloudflare.com URL
-# or:  ngrok http 4000
+# Recommended — a permanent address that never rotates:
+#   Koyeb (image is on Docker Hub as mauru2df/matchup-server) or Render.
+
+# Short-lived test only — a quick tunnel, run by hand when you need one:
+cloudflared tunnel --url http://localhost:4000     # prints an https://…trycloudflare.com URL
 ```
 
-* Quick tunnels get a **new URL on every start** — for a stable address use a
-  named Cloudflare tunnel with a domain you own (or point a subdomain at your
-  public IP).
+* A quick tunnel gets a **new URL on every start**. Nothing in this repo
+  pushes it to Vercel any more (the tunnel unit, the sync and the watchdog were
+  removed for exactly that reason), so a client built against one will go stale
+  the next time it restarts — which is why a permanent host is the answer for
+  anything visitors are meant to reach.
 * Set `VITE_SIGNALING_URL=<that URL>` in Vercel (Settings → Environment
-  Variables) and redeploy the client.
+  Variables) and redeploy the client — `VITE_*` values are baked in at build
+  time, so the var must exist *before* the build.
 * Set `CORS_ORIGIN=https://your-app.vercel.app` in `server/.env`, then restart
   the server — otherwise Socket.io rejects the browser.
 
@@ -866,33 +879,30 @@ systemctl --user daemon-reload && systemctl --user enable --now matchup
 loginctl enable-linger $USER          # boot-time start, not just at login
 ```
 
-**6. The relay, the tunnel, and one command for everything.** The running stack
-is four units:
+**6. The relay and one command for everything.** The running stack is three
+units (the tunnel and its watchdog are gone — see §5.2):
 
 | Unit | Enabled? | Why |
 | --- | --- | --- |
 | `mariadb` (system) | ✅ | owns your data |
 | `matchup` (user) | ✅ | waits for MariaDB, then serves API + signaling |
 | `matchup-turn` (user) | ✅ | coturn — `scripts/turn-up.sh` first, then follows its logs |
-| `matchup-tunnel` (user) | ✅ | a quick tunnel mints a new address every start, so its `ExecStartPost` runs `local.sh sync` — a changed URL is pushed to Vercel and the client redeployed automatically (step-by-step trail in `.sync.log`) |
 
-`scripts/local.sh` starts, repairs and reports the whole stack:
+`scripts/local.sh` starts, repairs and reports the local stack:
 
 ```bash
-scripts/local.sh status                 # all four units, health, tunnel URL, last synced
-scripts/local.sh start                  # start/repair server + coturn + tunnel
-scripts/local.sh start --sync-vercel    # …and push a changed URL to Vercel + redeploy
-scripts/local.sh sync                   # push the current tunnel URL to Vercel (what ExecStartPost runs)
-scripts/local.sh stop                   # stops server/relay/tunnel (MariaDB keeps running)
+scripts/local.sh status                 # units + health (reports the public API status too)
+scripts/local.sh start                  # start/repair server (+ coturn when installed)
+scripts/local.sh stop                   # stops server/relay (MariaDB keeps running)
 ```
 
 **Operational notes**
 
 | | |
 | --- | --- |
-| **Downtime** | The app is up while *this PC* is up. Vercel stays reachable regardless, but matching needs the signaling server + tunnel. |
+| **Downtime** | The app is up while *this PC* is up. Vercel stays reachable regardless, but data and matching need this server **and** a public API URL (`VITE_SIGNALING_URL`) pointing at it. |
 | **Backups** | The DB is now a file on your disk — cron `mariadb-dump matchup > matchup-$(date +%F).sql`, or just copy `/var/lib/mysql`. |
-| **Do not** | Expose port 3306. MariaDB binds to `127.0.0.1`; only the web server goes through the tunnel. |
+| **Do not** | Expose port 3306. MariaDB binds to `127.0.0.1`; only the web server is meant to be reached from outside. |
 | **Growing later** | If you outgrow this box: `mariadb-dump` → import into any hosted MariaDB/MySQL and change `MARIADB_HOST`/`MARIADB_PORT` — no code changes. |
 | **Size** | A profile row is a few hundred bytes; 1 GB of disk ≈ millions of rows. |
 
@@ -1018,8 +1028,8 @@ node scripts/e2e.js
 | Auth returns **429** `Too many attempts` | 20 credential attempts per minute per IP (`test:auth` + manual testing can use it up). Wait a minute. |
 | `test:auth` leaves rows behind | It deletes exactly what it created and sweeps `authtest_%`/`e2e_%` rows older than an hour — a crash mid-run is cleaned up by the next run. |
 | Board says **"Nobody from Europe is online"** | The counts only cover sockets that submitted a profile (`queue:join`) — a visitor who only opened the landing page has no country to count. Zero on a fresh deploy is correct, not a bug. |
-| **Everyone gets "could not reach the server"** (e.g. on Create account) | The site is calling a dead tunnel URL — typical after a reboot or tunnel restart. `scripts/local.sh status`: if `tunnel :` and `synced :` differ, run `scripts/local.sh sync`. The tunnel unit syncs itself now; if it didn't, `.sync.log` shows the step it died on (expired Vercel auth → `cd client && npx vercel login`, then sync again). |
-| Board shows **"Live counts are unavailable"** | `GET /api/presence` unreachable: stale tunnel URL in `VITE_SIGNALING_URL` → `scripts/local.sh sync`, or the IP hit the 60/min budget (wait a minute). |
+| **Everyone gets "could not reach the server"** (e.g. on Create account) | The client has no reachable API: `VITE_SIGNALING_URL` is unset — deliberately, since the tunnel was removed — or points at a host that is down. Set it to your permanent API https URL in Vercel (Settings → Environment Variables), redeploy, and make sure the server's `CORS_ORIGIN` includes `https://matchup-mu.vercel.app`. |
+| Board shows **"Live counts are unavailable"** | `GET /api/presence` unreachable for the same reason as above (API host unset or down), or the IP hit the 60/min budget (wait a minute). |
 
 ### Privacy notes
 

@@ -1,33 +1,37 @@
 /**
- * Paybill payments (client side of the ledger).
+ * Premium — the subscription, taken entirely by M-PESA STK push.
  *
- * How money actually moves:
+ * There is no paybill ledger here any more. The old flow ("here is your
+ * Account Number, pay it from a bank app, press I have paid, wait for the
+ * owner to match it against a statement") is gone, because Daraja tells us
+ * the answer itself the moment the buyer enters their PIN:
  *
- *   1. The user asks for a reference  → `POST /api/payments/intent`
- *      The app renders their unique Account Number (`MU1042` by default) plus
- *      the configured DTB paybill number and price.
- *   2. They pay into the paybill from their own bank app / M-PESA, entering
- *      that Account Number — the bank credits the business account and shows
- *      the number on the statement (and, for M-PESA, in the confirmation SMS).
- *   3. They press "I have paid" (the same endpoint — the row already exists).
- *   4. The owner opens `/admin` → Payments, matches the row against the bank
- *      statement and approves it. Approval stamps `premium_until` on the
- *      account and the user's lobby flips to "Premium active".
+ *   1. `createIntent(user, { phone })` opens a `purpose: 'premium'` charge and
+ *      fires the STK push — the phone prompts immediately. Reusing an open
+ *      charge means a double-tap can never start two prompts.
+ *   2. They confirm → Safaricom POSTs `/api/mpesa/callback` →
+ *      `commerce.settle()` stamps `premium_until` on their account.
+ *   3. The panel polls `status()` meanwhile, so a callback lost to a firewall
+ *      still resolves: `chargeStatus` asks Daraja directly once the callback
+ *      has had a head start.
  *
- * There is no bank callback to wait for: a plain paybill notifies by SMS /
- * e-mail / statement, so reconciliation is a human step by design. The ledger
- * exists so that step takes seconds instead of digging through a statement.
+ * The money lands in the Daraja shortcode's collection account, which the
+ * owner settles to their own M-PESA number on Safaricom's side — no business
+ * bank account is involved anywhere in this file.
  *
- * Everything here is read-only for the public — the only mutation is "create
- * (or re-fetch) my own pending intent". Approving lives in `admin.js`.
+ * Everything here is the signed-in user's own: a charge is only ever readable
+ * by its buyer, and `premiumUntil` is always read fresh from the database
+ * rather than the session, because the callback may have just changed it.
  */
 const mariaStore = require('./mariaStore');
+const socialStore = require('./socialStore');
 const settings = require('./settings');
 const accounts = require('./accounts');
+const commerce = require('./commerce');
 
 const { AuthError } = accounts;
 
-/** `maria` = the ledger lives in the database, `memory` = payments are off. */
+/** `maria` = premium can be sold, `memory` = payments are off. */
 let backend = 'memory';
 
 function init(storeMode) {
@@ -44,100 +48,98 @@ function requireDb() {
   }
 }
 
-/** What the lobby renders (safe subset of the settings — see `settings.js`). */
+function requireUser(user) {
+  if (!user || typeof user.id !== 'number') {
+    throw new AuthError('unauthorized', 'Please sign in to pay.', 401);
+  }
+  return user;
+}
+
+/**
+ * Premium charges have no "thing" to point at, so they share one ref id. The
+ * uniqueness that matters is (purpose, ref, buyer): one open prompt per buyer.
+ */
+const PREMIUM_REF = 0;
+
+/** What the lobby renders (the safe subset of the settings — see `settings.js`). */
 function config() {
   return settings.publicConfig();
 }
 
-/** Everything the payment screen shows for this user, from one intent row. */
-function toClient(payment, paymentSettings) {
-  if (!payment) return null;
+/** The buyer's live entitlement, straight from the row that settles it. */
+async function premiumUntilOf(user) {
+  const account = await mariaStore.getUser(user.id).catch(() => null);
+  return account?.premiumUntil ?? user.premiumUntil ?? null;
+}
+
+/**
+ * The panel's view of one premium charge — the charge plus the entitlement it
+ * will produce, so the UI never has to join two requests to draw itself.
+ */
+function toClient(charge, premiumUntil) {
+  if (!charge) return null;
   return {
-    id: payment.id,
-    status: payment.status,
-    // Bank + amount are read live from the settings: the owner may change the
-    // price or move to another paybill and every open intent follows.
-    bank: paymentSettings.bank,
-    paybill: paymentSettings.paybill,
-    accountNo: payment.accountNo,
-    amount: payment.amount,
-    currency: payment.currency,
-    productName: paymentSettings.productName,
-    premiumDays: payment.premiumDays ?? paymentSettings.premiumDays,
-    providerRef: payment.providerRef,
-    note: payment.note,
-    instructions: paymentSettings.instructions,
-    supportContact: paymentSettings.supportContact,
-    createdAt: payment.createdAt,
-    reviewedAt: payment.reviewedAt,
+    id: charge.id,
+    status: charge.status,
+    amount: charge.amount,
+    currency: charge.currency,
+    premiumDays: charge.premiumDays,
+    phone: charge.phone,
+    mpesaRef: charge.mpesaRef,
+    error: charge.status === 'failed' ? charge.error : null,
+    createdAt: charge.createdAt,
+    paidAt: charge.paidAt,
+    premiumUntil,
   };
 }
 
 /**
- * Create (or return the already open) payment intent for a signed-in account.
- * Reusing the pending row means a reload, a retry or a second tab can never
- * hand the same person two different account numbers.
+ * Open the premium charge and prompt the phone.
+ *
+ * Safe to call twice: an already-open charge for this buyer is returned after
+ * being re-prompted, so a reload, a retry or a second tab can never leave two
+ * live STK prompts against one account.
  *
  * @param {{id:number, username:string}} user authenticated account
- * @param {{providerRef?: string}} extra the transaction code they saw
+ * @param {{phone?: string}} extra the M-PESA number to prompt
  */
-async function createIntent(user, { providerRef } = {}) {
+async function createIntent(user, { phone } = {}) {
   requireDb();
-  const cfg = settings.get();
-  if (!cfg.features.premium || !cfg.payment.enabled) {
-    throw new AuthError(
-      'payments-disabled',
-      'Payments are currently disabled — try again a little later.',
-      409,
-    );
-  }
-  if (!user || typeof user.id !== 'number') {
-    throw new AuthError('unauthorized', 'Please sign in to get a payment reference.', 401);
-  }
-
-  const accountNo = settings.renderAccountNo(cfg.payment.accountFormat, {
-    id: user.id,
-    username: user.username,
+  requireUser(user);
+  const { charge } = await commerce.createCharge(user, {
+    purpose: 'premium',
+    refId: PREMIUM_REF,
+    phone,
   });
-
-  const existing = await mariaStore.findPendingPayment(user.id);
-  if (existing) {
-    // Refresh the reference itself — the format may have been edited since.
-    if (existing.accountNo !== accountNo) {
-      const updated = await mariaStore.updatePaymentAccountNo(existing.id, accountNo);
-      return toClient(updated || existing, cfg.payment);
-    }
-    return toClient(existing, cfg.payment);
-  }
-
-  const payment = await mariaStore.insertPayment({
-    accountId: user.id,
-    username: user.username,
-    amount: cfg.payment.amount,
-    currency: cfg.payment.currency,
-    paybill: cfg.payment.paybill,
-    accountNo,
-    providerRef,
-    premiumDays: cfg.payment.premiumDays,
-  });
-  return toClient(payment, cfg.payment);
+  return toClient(charge, await premiumUntilOf(user));
 }
 
-/** The signed-in user's own ledger + entitlement — never anyone else's. */
+/**
+ * One premium charge, settled on the way out if Daraja already knows the
+ * answer. The client polls this every 3s while the phone shows the prompt.
+ */
+async function status(user, id) {
+  requireDb();
+  requireUser(user);
+  const { charge } = await commerce.chargeStatus(user, id);
+  return toClient(charge, await premiumUntilOf(user));
+}
+
+/** The signed-in user's own receipts + when premium (if any) runs out. */
 async function mine(user) {
   requireDb();
-  if (!user || typeof user.id !== 'number') {
-    throw new AuthError('unauthorized', 'Please sign in again.', 401);
-  }
-  const [rows, account] = await Promise.all([
-    mariaStore.listPaymentsForAccount(user.id),
-    mariaStore.findAccountByUsername(user.username),
+  requireUser(user);
+  const [rows, premiumUntil] = await Promise.all([
+    socialStore.listChargesForBuyer({ purpose: 'premium', buyerId: user.id, size: 10 }),
+    premiumUntilOf(user),
   ]);
-  const cfg = settings.get().payment;
   return {
-    payments: rows.map((row) => toClient(row, cfg)),
-    premiumUntil: account?.premiumUntil ?? user.premiumUntil ?? null,
+    premiumUntil,
+    // The still-open charge is what a returning payer needs: it is the prompt
+    // their phone may still be showing.
+    open: rows.find((row) => row.status === 'pending') ?? null,
+    payments: rows,
   };
 }
 
-module.exports = { init, config, createIntent, mine, backend: () => backend };
+module.exports = { init, config, createIntent, status, mine, backend: () => backend };

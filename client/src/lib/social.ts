@@ -14,16 +14,20 @@
 import type {
   Charge,
   Comment,
+  Creator,
+  CreatorSubscriptionOffer,
   Paged,
   Post,
   Room,
   RoomAccess,
+  Subscription,
   Wallet,
   WalletEntry,
 } from '../types/social';
 import type { Profile } from '../types';
 import { SIGNALING_URL } from './iceServers';
 import { getToken } from './auth';
+import { upload as uploadToBlob } from '@vercel/blob/client';
 
 const BASE = `${SIGNALING_URL.replace(/\/$/, '')}/api`;
 
@@ -87,6 +91,7 @@ export interface FeedQuery {
   size?: number;
   q?: string;
   adult?: boolean;
+  creatorId?: number;
 }
 
 export function listPosts(query: FeedQuery = {}): Promise<Paged<Post>> {
@@ -95,6 +100,7 @@ export function listPosts(query: FeedQuery = {}): Promise<Paged<Post>> {
   if (query.size) params.set('size', String(query.size));
   if (query.q) params.set('q', query.q);
   if (query.adult) params.set('adult', '1');
+  if (query.creatorId) params.set('creatorId', String(query.creatorId));
   const qs = params.toString();
   return request<Paged<Post>>(`/posts${qs ? `?${qs}` : ''}`);
 }
@@ -148,7 +154,47 @@ export function addComment(id: number, body: string): Promise<{ comment: Comment
  * Upload media bytes (image or short video) and get back the `mediaKey` to
  * put on a post. Raw body on purpose — the file never becomes base64 JSON.
  */
-export async function uploadMedia(file: File): Promise<{ key: string }> {
+export async function uploadMedia(
+  file: File,
+  options: { directUpload?: boolean } = {},
+): Promise<{ key: string }> {
+  if (options.directUpload) {
+    const ext = ({
+      'image/jpeg': '.jpg',
+      'image/png': '.png',
+      'image/webp': '.webp',
+      'image/gif': '.gif',
+      'video/mp4': '.mp4',
+      'video/webm': '.webm',
+    } as Record<string, string>)[file.type];
+    if (!ext) {
+      throw new SocialError(
+        'Upload an image (JPEG, PNG, WebP, GIF) or a video (MP4, WebM).',
+        'media-type',
+        415,
+      );
+    }
+    const key = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}${ext}`;
+    const token = getToken();
+    const uploadUrl = BASE.startsWith('http')
+      ? `${BASE}/media/direct`
+      : `${window.location.origin}${BASE}/media/direct`;
+    try {
+      const result = await uploadToBlob(key, file, {
+        access: 'private',
+        handleUploadUrl: uploadUrl,
+        headers: token ? { authorization: `Bearer ${token}` } : {},
+        contentType: file.type,
+      });
+      return { key: result.pathname };
+    } catch (err) {
+      throw new SocialError(
+        err instanceof Error ? err.message : 'The upload failed — try again.',
+        'upload',
+      );
+    }
+  }
+
   let res: Response;
   try {
     res = await fetch(`${BASE}/media`, {
@@ -176,11 +222,62 @@ export async function uploadMedia(file: File): Promise<{ key: string }> {
   return { key: data.key };
 }
 
+// ── Creators: follow + subscribe ─────────────────────────────────────────────
+
+export function getCreator(id: number): Promise<{ creator: Creator }> {
+  return request<{ creator: Creator }>(`/creators/${id}`);
+}
+
+export function followCreator(
+  id: number,
+  following: boolean,
+): Promise<{ following: boolean; followers: number }> {
+  return request<{ following: boolean; followers: number }>(`/creators/${id}/follow`, {
+    method: following ? 'POST' : 'DELETE',
+  });
+}
+
+/**
+ * Free offers activate immediately; a priced offer returns a `charge` that
+ * must be watched with `waitForPayment()` exactly like a post or a room.
+ */
+export function subscribeToCreator(
+  id: number,
+  phone?: string,
+): Promise<{ subscription: Subscription | null; charge: Charge | null }> {
+  return request<{ subscription: Subscription | null; charge: Charge | null }>(
+    `/creators/${id}/subscribe`,
+    { method: 'POST', body: phone ? { phone } : {} },
+  );
+}
+
+export function cancelCreatorSubscription(id: number): Promise<{ subscription: Subscription }> {
+  return request<{ subscription: Subscription }>(`/creators/${id}/subscribe`, {
+    method: 'DELETE',
+  });
+}
+
+export function getMyCreatorSubscription(): Promise<{ subscription: CreatorSubscriptionOffer }> {
+  return request<{ subscription: CreatorSubscriptionOffer }>('/creators/me/subscription');
+}
+
+export function saveMyCreatorSubscription(input: {
+  enabled: boolean;
+  price: number;
+  periodDays: number;
+  perk: string;
+}): Promise<{ subscription: CreatorSubscriptionOffer }> {
+  return request<{ subscription: CreatorSubscriptionOffer }>('/creators/me/subscription', {
+    method: 'PUT',
+    body: input,
+  });
+}
+
 // ── Charges (M-PESA) ─────────────────────────────────────────────────────────
 
 /** Open a payment request; in `stk` mode the phone prompts for the PIN now. */
 export function createCharge(input: {
-  purpose: 'post' | 'room';
+  purpose: 'post' | 'room' | 'sub';
   refId: number;
   phone: string;
 }): Promise<{ charge: Charge }> {

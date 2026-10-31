@@ -14,9 +14,6 @@ npm-debug.log*
 .vite/
 .vercel
 .railway
-.tunnel-url
-.sync.lock
-.sync.log
 
 # User-uploaded media — runtime data, recreated by every upload
 server/uploads/

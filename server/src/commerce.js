@@ -24,6 +24,7 @@ const mediaToken = require('./mediaToken');
 const settings = require('./settings');
 const accounts = require('./accounts');
 const mpesa = require('./mpesa');
+const mediaStore = require('./mediaStore');
 
 const { AuthError } = accounts;
 
@@ -45,6 +46,20 @@ function requireDb() {
 }
 
 const cfg = () => settings.get().commerce;
+
+/**
+ * The house, as a payee. Premium is the only charge nobody on the platform
+ * earns — the money goes to the owner's collection account — but the schema
+ * wants a payee on every row, so it is one stable, never-used account id.
+ */
+const HOUSE_PAYEE = { id: 0, username: 'matchup' };
+
+/** A `premium_until` that has not run out yet. */
+function premiumActive(iso) {
+  if (!iso) return false;
+  const until = new Date(iso).getTime();
+  return Number.isFinite(until) && until > Date.now();
+}
 
 /** The house cut: `gross → { commission, net }`, rounded to whole cents. */
 function split(amount) {
@@ -74,6 +89,29 @@ function requireEnabled(flag, message) {
   }
 }
 
+/**
+ * Every payment on the platform is an STK push — there is no manual path left
+ * to fall back to, so an unconfigured Daraja has to stop the charge before a
+ * row is written, not after a prompt that will never arrive.
+ */
+function requireStk() {
+  if (mpesa.isConfigured()) return;
+  const m = settings.get().mpesa;
+  const missing = !m.consumerKey || !m.consumerSecret
+    ? 'the consumer key and secret'
+    : !m.shortcode
+      ? 'the shortcode'
+      : !m.passkey
+        ? 'the Lipa na M-PESA passkey'
+        : 'turning M-PESA on';
+  throw new AuthError(
+    'mpesa-not-configured',
+    `M-PESA cannot take a payment yet — ${missing} is still missing in Settings. ` +
+      'Test the connection from the dashboard to see exactly what is outstanding.',
+    503,
+  );
+}
+
 // ── Media uploads ────────────────────────────────────────────────────────────
 
 /** Where paid media lives: NOT statically served — only via the gated route. */
@@ -90,13 +128,16 @@ const MEDIA_TYPES = {
 
 /**
  * Store one raw upload. The bytes come from `express.raw()` in `server.js`;
- * this validates the type and drops the file on disk under a random key.
+ * this validates the type and files them under a random key. Private object
+ * storage is used first when configured; MariaDB (`media_blobs`) and the
+ * plain filesystem remain as local/development fallbacks.
  *
  * @returns {Promise<string>} the key to hand to `POST /api/posts`
  */
 async function saveUpload({ buffer, contentType }) {
   requireDb();
-  const ext = MEDIA_TYPES[String(contentType || '').split(';')[0].trim().toLowerCase()];
+  const mime = String(contentType || '').split(';')[0].trim().toLowerCase();
+  const ext = MEDIA_TYPES[mime];
   if (!ext) {
     throw new AuthError('media-type', 'Upload an image (JPEG, PNG, WebP, GIF) or a video (MP4, WebM).', 415);
   }
@@ -104,12 +145,44 @@ async function saveUpload({ buffer, contentType }) {
     throw new AuthError('media-empty', 'That file is empty — choose another one.', 400);
   }
   const key = `${Date.now().toString(36)}${crypto.randomBytes(6).toString('hex')}${ext}`;
+  // Object storage first: the database is for metadata, not media bytes.
+  if (await mediaStore.save(key, mime, buffer)) return key;
+  if (backend === 'maria') {
+    await mariaStore.saveMediaBlob(key, mime, buffer);
+    return key;
+  }
   await fs.promises.mkdir(UPLOAD_DIR, { recursive: true });
   await fs.promises.writeFile(path.join(UPLOAD_DIR, key), buffer);
   return key;
 }
 
 const safeKey = (key) => /^[A-Za-z0-9._-]{4,80}$/.test(String(key || ''));
+const MEDIA_EXTENSIONS = new Set(Object.values(MEDIA_TYPES));
+
+/** Validate a client-generated direct-upload key before issuing a Blob token. */
+function isMediaKey(key) {
+  const value = String(key || '');
+  return safeKey(value) && [...MEDIA_EXTENSIONS].some((ext) => value.endsWith(ext));
+}
+
+function mediaContentTypes() {
+  return Object.keys(MEDIA_TYPES);
+}
+
+/** Blob first, then the historical DB row, then the legacy disk file. */
+async function mediaExists(key) {
+  if (!safeKey(key)) return false;
+  try {
+    if (await mediaStore.exists(key)) return true;
+  } catch {
+    /* object storage unavailable — fall through to the durable fallbacks */
+  }
+  if (backend === 'maria') {
+    const blob = await mariaStore.getMediaBlob(key);
+    return Boolean(blob);
+  }
+  return fs.existsSync(path.join(UPLOAD_DIR, key));
+}
 
 // ── Posts ────────────────────────────────────────────────────────────────────
 
@@ -136,7 +209,7 @@ async function createPost(user, input = {}) {
     if (!mediaKey || !safeKey(mediaKey)) {
       throw new AuthError('media', 'Upload a file first — or pick a link post.', 400);
     }
-    if (!fs.existsSync(path.join(UPLOAD_DIR, mediaKey))) {
+    if (!(await mediaExists(mediaKey))) {
       throw new AuthError('media', 'That upload did not land — try again.', 400);
     }
   }
@@ -176,12 +249,18 @@ async function createPost(user, input = {}) {
 }
 
 /** One page of the feed, decorated with the viewer's own liked/owned flags. */
-async function feed(user, { page, size, q, adult } = {}) {
+async function feed(user, { page, size, q, adult, creatorId } = {}) {
   requireDb();
   const wantsAdult = adult === true || adult === '1' || adult === 1;
   // The adult shelf only exists for signed-in adults — regardless of the switch.
   const showAdult = wantsAdult && isAdultAllowed(user);
-  const result = await socialStore.listPosts({ page, size, q, adult: showAdult });
+  const result = await socialStore.listPosts({
+    page,
+    size,
+    q,
+    adult: showAdult,
+    creatorId: creatorId ? Number(creatorId) : null,
+  });
   const items = await socialStore.decorateForViewer(
     result.items,
     user?.id ?? null,
@@ -290,35 +369,59 @@ async function readPostMedia(user, id, res, token) {
     throw new AuthError('payment-required', 'Pay to unlock this post.', 402);
   }
 
-  const file = path.join(UPLOAD_DIR, path.basename(post.mediaKey));
-  if (!safeKey(path.basename(post.mediaKey)) || !fs.existsSync(file)) {
+  const key = path.basename(post.mediaKey);
+  const mimeFor = (value) =>
+    Object.entries(MEDIA_TYPES).find(([, ext]) => value.endsWith(ext))?.[0] ||
+    'application/octet-stream';
+
+  let data = null;
+  let type = mimeFor(key);
+  try {
+    const stored = await mediaStore.read(key);
+    if (stored?.data) {
+      data = stored.data;
+      type = stored.mime || type;
+    }
+  } catch (err) {
+    console.warn('[commerce] blob read failed:', err.message);
+  }
+
+  if (!data && backend === 'maria') {
+    const blob = await mariaStore.getMediaBlob(key);
+    if (blob?.data) {
+      data = Buffer.isBuffer(blob.data) ? blob.data : Buffer.from(blob.data);
+      type = blob.mime || type;
+    }
+  }
+
+  if (!data && backend !== 'maria') {
+    const file = path.join(UPLOAD_DIR, key);
+    if (safeKey(key) && fs.existsSync(file)) data = await fs.promises.readFile(file);
+  }
+
+  if (!data) {
     throw new AuthError('not-found', 'That file is missing — the creator can re-upload it.', 404);
   }
-  const stat = await fs.promises.stat(file);
-  const type =
-    Object.entries(MEDIA_TYPES).find(([, ext]) => file.endsWith(ext))?.[0] || 'application/octet-stream';
 
   res.setHeader('Content-Type', type);
-  res.setHeader('Content-Length', String(stat.size));
+  res.setHeader('Content-Length', String(data.length));
   res.setHeader('Cache-Control', 'private, max-age=60');
-  // Range support keeps <video> seeking usable without a second copy.
+  res.setHeader('Accept-Ranges', 'bytes');
   const range = res.req.headers.range;
   if (range) {
     const match = /bytes=(\d+)-(\d*)/.exec(range);
     if (match) {
       const start = Number(match[1]);
-      const end = match[2] ? Number(match[2]) : stat.size - 1;
-      if (start < stat.size) {
+      const end = match[2] ? Number(match[2]) : data.length - 1;
+      if (start < data.length) {
         res.status(206);
-        res.setHeader('Content-Range', `bytes ${start}-${end}/${stat.size}`);
+        res.setHeader('Content-Range', `bytes ${start}-${end}/${data.length}`);
         res.setHeader('Content-Length', String(end - start + 1));
-        fs.createReadStream(file, { start, end }).pipe(res);
-        return res;
+        return res.end(data.subarray(start, end + 1));
       }
     }
   }
-  res.setHeader('Accept-Ranges', 'bytes');
-  return fs.createReadStream(file).pipe(res);
+  return res.end(data);
 }
 
 async function removePost(user, id, { admin = false } = {}) {
@@ -329,6 +432,20 @@ async function removePost(user, id, { admin = false } = {}) {
     throw new AuthError('forbidden', 'You can only delete your own posts.', 403);
   }
   await socialStore.deletePost(id);
+  // Best-effort media cleanup — a failed sweep must not fail the delete.
+  try {
+    if (post.mediaKey) {
+      const key = path.basename(post.mediaKey);
+      await mediaStore.remove(key).catch(() => undefined);
+      if (backend === 'maria') {
+        await mariaStore.deleteMediaBlob(key);
+      } else {
+        await fs.promises.unlink(path.join(UPLOAD_DIR, key)).catch(() => undefined);
+      }
+    }
+  } catch (err) {
+    console.warn('[commerce] media cleanup failed:', err.message);
+  }
   return post;
 }
 
@@ -366,12 +483,109 @@ async function addComment(user, id, body) {
   return { comment: await socialStore.insertComment({ postId: id, accountId: user.id, username: user.username, body: text.slice(0, 500) }) };
 }
 
+// ── Creators: follow + subscribe ─────────────────────────────────────────────
+
+/** Public creator card — profile, audience counts, offer and viewer state. */
+async function creator(user, id) {
+  requireDb();
+  const found = await socialStore.getCreator(id, user?.id ?? null);
+  if (!found) throw new AuthError('not-found', 'That creator does not exist.', 404);
+  return { creator: found };
+}
+
+async function follow(user, id, following = true) {
+  requireDb();
+  requireUser(user);
+  const found = await socialStore.getCreator(id, user.id);
+  if (!found) throw new AuthError('not-found', 'That creator does not exist.', 404);
+  if (found.banned) throw new AuthError('banned', 'That account is unavailable.', 403);
+  if (found.viewer.isSelf) {
+    throw new AuthError('self', 'You cannot follow yourself.', 400);
+  }
+  return socialStore.followCreator(user.id, id, Boolean(following));
+}
+
+/** The creator's own offer: free or paid, how much, how long, what they get. */
+async function updateCreatorSubscription(user, patch = {}) {
+  requireDb();
+  requireUser(user);
+  requireEnabled('social', 'Subscriptions are switched off right now.');
+  const c = cfg();
+  let price = Math.round(Number(patch.price) || 0);
+  if (price > 0) price = Math.min(c.maxPrice, Math.max(c.minPrice, price));
+  const periodDays = Math.min(365, Math.max(1, Math.trunc(Number(patch.periodDays) || 30)));
+  const perk = String(patch.perk ?? '').trim().slice(0, 160);
+  const offer = await socialStore.putCreatorSub(user.id, {
+    enabled: Boolean(patch.enabled),
+    price,
+    currency: c.currency,
+    periodDays,
+    perk,
+  });
+  return { subscription: offer };
+}
+
+async function myCreatorSubscription(user) {
+  requireDb();
+  requireUser(user);
+  return { subscription: await socialStore.getCreatorSub(user.id) };
+}
+
+/**
+ * Subscribe to a creator. Free offers activate immediately; a priced offer
+ * opens the same M-PESA STK charge as a post or a room, and settlement
+ * activates the subscription exactly once.
+ */
+async function subscribe(user, id, { phone } = {}) {
+  requireDb();
+  requireUser(user);
+  requireEnabled('social', 'Subscriptions are switched off right now.');
+  const found = await socialStore.getCreator(id, user.id);
+  if (!found) throw new AuthError('not-found', 'That creator does not exist.', 404);
+  if (found.banned) throw new AuthError('banned', 'That account is unavailable.', 403);
+  if (found.viewer.isSelf) {
+    throw new AuthError('self', 'You cannot subscribe to yourself.', 400);
+  }
+  if (!found.subscription.enabled) {
+    throw new AuthError('subscriptions-off', 'This creator is not taking subscribers.', 409);
+  }
+  if (found.viewer.subscribed) {
+    throw new AuthError('already-subscribed', 'You already subscribe to this creator.', 409);
+  }
+
+  if (found.subscription.price <= 0) {
+    const subscription = await socialStore.activateSubscription({
+      subscriberId: user.id,
+      creatorId: found.id,
+      price: 0,
+      currency: found.subscription.currency,
+      periodDays: found.subscription.periodDays,
+    });
+    return { subscription, charge: null };
+  }
+
+  const opened = await createCharge(user, { purpose: 'sub', refId: found.id, phone });
+  return { ...opened, subscription: null };
+}
+
+/** Stop renewing; access remains until the paid period ends. */
+async function cancelSubscription(user, id) {
+  requireDb();
+  requireUser(user);
+  const current = await socialStore.getSubscription(user.id, id);
+  if (!current) throw new AuthError('not-found', 'You are not subscribed to that creator.', 404);
+  return { subscription: await socialStore.cancelSubscription(user.id, id) };
+}
+
 // ── Charges (the STK push) ───────────────────────────────────────────────────
 
 /**
- * Resolve what a charge is for: `{ payeeId, payeeUsername, amount, isAdult, owned }`.
- * Everything new on the platform routes through here, so a new paid thing
- * (say, a paid DM) only needs a new `purpose`.
+ * Resolve what a charge is for: `{ payeeId, payeeUsername, amount, owned, … }`.
+ * Everything on the platform routes through here, so a new paid thing (say, a
+ * paid DM) only needs a new `purpose`.
+ *
+ * Three purposes exist: `post` and `room` pay a creator; `premium` pays the
+ * house and carries its own `premiumDays`.
  */
 async function resolveTarget(user, purpose, refId) {
   if (purpose === 'post') {
@@ -421,11 +635,55 @@ async function resolveTarget(user, purpose, refId) {
     };
   }
 
+  if (purpose === 'sub') {
+    const creator = await socialStore.getCreator(refId, user.id);
+    if (!creator) throw new AuthError('not-found', 'That creator does not exist.', 404);
+    if (creator.banned) throw new AuthError('banned', 'That account is unavailable.', 403);
+    if (creator.viewer.isSelf) {
+      throw new AuthError('self', 'You cannot subscribe to yourself.', 400);
+    }
+    if (!creator.subscription.enabled) {
+      throw new AuthError('subscriptions-off', 'This creator is not taking subscribers.', 409);
+    }
+    return {
+      payeeId: creator.id,
+      payeeUsername: creator.username,
+      amount: creator.subscription.price,
+      currency: creator.subscription.currency,
+      label: `Subscription · @${creator.username}`,
+      owned: creator.viewer.subscribed,
+      periodDays: creator.subscription.periodDays,
+    };
+  }
+
+  if (purpose === 'premium') {
+    const p = settings.get().payment;
+    if (!p.enabled || !settings.get().features.premium) {
+      throw new AuthError('payments-disabled', 'Premium is switched off right now.', 409);
+    }
+    // Buying more premium while some is already running is the one thing worth
+    // refusing: the price is a fixed subscription, not a top-up, and an open
+    // "extend" button next to an active one is how double charges happen.
+    const owned = premiumActive(user.premiumUntil);
+    return {
+      // The house is the payee: there is no creator wallet to credit, the
+      // money lands in the collection account the owner settles to their own
+      // M-PESA number. `HOUSE_PAYEE` keeps the column's NOT NULL honest.
+      payeeId: HOUSE_PAYEE.id,
+      payeeUsername: HOUSE_PAYEE.username,
+      amount: p.amount,
+      currency: p.currency,
+      label: p.productName,
+      owned,
+      premiumDays: Math.max(1, Math.trunc(Number(p.premiumDays) || 30)),
+    };
+  }
+
   throw new AuthError('purpose', 'Unknown payment type.', 400);
 }
 
 /**
- * Open a charge for one thing and, in `stk` mode, prompt the phone.
+ * Open a charge for one thing and prompt the phone.
  *
  * Order matters: the row exists (with a null checkout id) before Daraja is
  * called, and the unique index on `checkout_request_id` is filled in right
@@ -434,7 +692,14 @@ async function resolveTarget(user, purpose, refId) {
 async function createCharge(user, { purpose, refId, phone } = {}) {
   requireDb();
   requireUser(user);
-  if (!cfg().enabled) {
+  // The social platform's master switch governs posts and rooms. Premium is
+  // bought from the lobby, not the feed, so it answers to its own switch —
+  // turning paid content off must not silently stop people renewing.
+  if (purpose === 'premium') {
+    if (!settings.get().payment.enabled) {
+      throw new AuthError('payments-disabled', 'Premium purchases are switched off right now.', 409);
+    }
+  } else if (!cfg().enabled) {
     throw new AuthError('payments-disabled', 'Paid content is switched off right now.', 409);
   }
   const target = await resolveTarget(user, purpose, Number(refId));
@@ -448,12 +713,12 @@ async function createCharge(user, { purpose, refId, phone } = {}) {
 
   // Reuse an open charge: a double-tap on Pay must not start two STK pushes.
   const open = await socialStore.findOpenCharge({ purpose, refId: Number(refId), buyerId: user.id });
-  const mpesaCfg = settings.get().mpesa;
-  const useStk = Boolean(mpesaCfg.enabled && mpesaCfg.mode === 'stk');
+  requireStk();
 
   let charge = open;
   if (!charge) {
-    const { commission, net } = split(amount);
+    // Premium is the whole house take — there is no creator to split with.
+    const { commission, net } = purpose === 'premium' ? { commission: amount, net: 0 } : split(amount);
     charge = await socialStore.insertCharge({
       purpose,
       refId: Number(refId),
@@ -466,13 +731,9 @@ async function createCharge(user, { purpose, refId, phone } = {}) {
       currency: target.currency || cfg().currency,
       commission,
       net,
+      premiumDays: target.premiumDays ?? null,
+      periodDays: target.periodDays ?? null,
     });
-  }
-
-  if (!useStk) {
-    // Manual mode: the row is the request; the owner approves it after
-    // seeing the money on the statement (same ritual as the paybill ledger).
-    return { charge: { ...charge, instructions: manualInstructions(charge, user) } };
   }
 
   try {
@@ -503,18 +764,6 @@ async function createCharge(user, { purpose, refId, phone } = {}) {
   return { charge: await socialStore.getCharge(charge.id) };
 }
 
-function manualInstructions(charge, user) {
-  const m = settings.get().mpesa;
-  const reference = settings.renderAccountNo(m.accountFormat, { id: user.id, username: user.username });
-  const parts = [
-    m.paybill
-      ? `Pay KES ${charge.amount} to paybill ${m.paybill}, account number ${reference}.`
-      : `Pay KES ${charge.amount} using your bank or M-PESA app, reference ${reference}.`,
-    'Then wait — the owner confirms the payment and your access opens automatically.',
-  ];
-  return parts.join(' ');
-}
-
 /**
  * Read one charge back, settling it if Daraja already knows the answer.
  *
@@ -530,8 +779,7 @@ async function chargeStatus(user, id) {
   }
 
   if (charge.status === 'pending') {
-    const m = settings.get().mpesa;
-    if (m.enabled && m.mode === 'stk' && charge.checkoutRequestId) {
+    if (charge.checkoutRequestId) {
       // Give the callback a head start — asking Daraja on every poll hammers
       // the query endpoint for no reason.
       const ageMs = Date.now() - Date.parse(charge.createdAt);
@@ -557,16 +805,17 @@ async function chargeStatus(user, id) {
   return { charge };
 }
 
-/** STK requests die after 5 minutes; manual requests get longer to be paid. */
-const ageExpired = (charge) => {
-  const age = Date.now() - Date.parse(charge.createdAt);
-  return charge.checkoutRequestId ? age > 5 * 60_000 : age > 15 * 60_000;
-};
+/** An STK request dies after 5 minutes — Daraja stops honouring it by then. */
+const ageExpired = (charge) => Date.now() - Date.parse(charge.createdAt) > 5 * 60_000;
 
 /**
- * The settlement: paid row → creator's wallet, exactly once.
+ * The settlement: paid row → whatever the charge bought, exactly once.
  * Safe to call from the callback, a status poll and an admin approval — the
- * first one wins the `pending → paid` UPDATE and credits; the rest no-op.
+ * first one wins the `pending → paid` UPDATE and acts; the rest no-op.
+ *
+ *   `premium` → stamps `premium_until` on the BUYER (they bought time, not
+ *               credit) using the period quoted when the prompt was sent;
+ *   `post` / `room` → credits the creator's wallet with the net share.
  *
  * @returns {Promise<boolean>} true when this call moved the money
  */
@@ -581,11 +830,33 @@ async function settle(chargeId, { receipt = null, resultCode = 0, description = 
   });
   if (!won) return false;
 
-  await socialStore.creditWallet(charge.payeeId, charge.net, {
-    kind: 'sale',
-    chargeId: charge.id,
-    memo: `${charge.purpose === 'post' ? 'Post' : 'Room'} sale → ${charge.buyerUsername}`,
-  });
+  if (charge.purpose === 'premium') {
+    const days = Number.isFinite(charge.premiumDays)
+      ? charge.premiumDays
+      : Number(settings.get().payment.premiumDays) || 30;
+    await mariaStore.updateUserFlags(charge.buyerId, { premiumDays: days });
+  } else if (charge.purpose === 'sub') {
+    const periodDays = Number.isFinite(charge.periodDays) ? charge.periodDays : 30;
+    await socialStore.activateSubscription({
+      subscriberId: charge.buyerId,
+      creatorId: charge.refId,
+      chargeId: charge.id,
+      price: charge.amount,
+      currency: charge.currency,
+      periodDays,
+    });
+    await socialStore.creditWallet(charge.payeeId, charge.net, {
+      kind: 'sale',
+      chargeId: charge.id,
+      memo: `Subscription sale → ${charge.buyerUsername}`,
+    });
+  } else {
+    await socialStore.creditWallet(charge.payeeId, charge.net, {
+      kind: 'sale',
+      chargeId: charge.id,
+      memo: `${charge.purpose === 'post' ? 'Post' : 'Room'} sale → ${charge.buyerUsername}`,
+    });
+  }
   if (charge.purpose === 'post') {
     mariaStore
       .query('UPDATE posts SET purchases = purchases + 1 WHERE id = ?', [charge.refId])
@@ -727,6 +998,8 @@ module.exports = {
   isAdultAllowed,
   // posts
   saveUpload,
+  isMediaKey,
+  mediaContentTypes,
   createPost,
   feed,
   mine,
@@ -736,6 +1009,13 @@ module.exports = {
   like,
   listComments,
   addComment,
+  // creators
+  creator,
+  follow,
+  updateCreatorSubscription,
+  myCreatorSubscription,
+  subscribe,
+  cancelSubscription,
   // charges
   createCharge,
   chargeStatus,

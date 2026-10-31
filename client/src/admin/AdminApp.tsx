@@ -28,19 +28,17 @@ import {
 import { ErrorBanner, Pill } from './ui';
 import OverviewTab from './OverviewTab';
 import UsersTab from './UsersTab';
-import PaymentsTab from './PaymentsTab';
 import ContentTab from './ContentTab';
 import EarningsTab from './EarningsTab';
 import RoomsTab from './RoomsTab';
 import SettingsTab from './SettingsTab';
 import AuditTab from './AuditTab';
 
-type TabId = 'overview' | 'users' | 'payments' | 'content' | 'earnings' | 'rooms' | 'settings' | 'audit';
+type TabId = 'overview' | 'users' | 'content' | 'earnings' | 'rooms' | 'settings' | 'audit';
 
 const TABS: { id: TabId; label: string }[] = [
   { id: 'overview', label: 'Overview' },
   { id: 'users', label: 'Users' },
-  { id: 'payments', label: 'Payments' },
   { id: 'content', label: 'Content' },
   { id: 'earnings', label: 'Earnings' },
   { id: 'rooms', label: 'Rooms' },
@@ -151,7 +149,6 @@ export default function AdminApp() {
 
       {tab === 'overview' && <OverviewTab />}
       {tab === 'users' && <UsersTab />}
-      {tab === 'payments' && <PaymentsTab />}
       {tab === 'content' && <ContentTab />}
       {tab === 'earnings' && <EarningsTab />}
       {tab === 'rooms' && <RoomsTab />}

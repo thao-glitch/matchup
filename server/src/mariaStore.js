@@ -16,12 +16,16 @@
  */
 
 const fs = require('fs');
+const path = require('path');
 const mysql = require('mysql2/promise');
 
 const RETENTION_DAYS = 30;
 const PURGE_INTERVAL_MS = 6 * 60 * 60 * 1000; // every 6h
 const KEEPALIVE_INTERVAL_MS = 5 * 60 * 1000; // every 5min — keeps hosted DBs awake
-const CONNECT_TIMEOUT_MS = 4000;
+// A remote TLS handshake (hosted MySQL) needs more than a LAN connect: free
+// tiers can take a moment to answer a cold connection. 15s fails over to the
+// in-memory store slowly enough to never trigger on a healthy database.
+const CONNECT_TIMEOUT_MS = Number(process.env.MARIADB_CONNECT_TIMEOUT_MS) || 15000;
 /** Database names get interpolated into DDL — identifier-safe characters only. */
 const SAFE_DB_NAME = /^[A-Za-z0-9_]+$/;
 
@@ -157,14 +161,18 @@ const SCHEMA_ADMIN_SESSIONS = `
 `;
 
 /**
- * Payments — the paybill ledger.
+ * Payments — the LEGACY paybill ledger.
  *
- * One row per "I have paid" intent. No account FK on purpose: deleting a user
- * must not delete the record of money that arrived on the bank statement.
- * `username` is a snapshot taken at intent time for the same reason.
+ * This table is no longer written to: every payment (premium included) now
+ * goes through `charges` as an STK push, which settles itself from the Daraja
+ * callback the moment the buyer enters their PIN. The table is kept because
+ * rows already on it are the record of money that arrived on the bank
+ * statement, and the dashboard still summarises them — but nothing creates or
+ * reviews a row here any more.
  *
- * `status` walks pending → approved | rejected. Approving stamps
- * `premium_until` on the account (see `admin.js`).
+ * No account FK on purpose: deleting a user must not delete the record of
+ * money that arrived. `username` is a snapshot taken at intent time for the
+ * same reason.
  */
 const SCHEMA_PAYMENTS = `
   CREATE TABLE IF NOT EXISTS payments (
@@ -220,10 +228,14 @@ const SCHEMA_AUDIT = `
  * The social platform: posts, the payment instrument behind every paid view,
  * the creator wallets and the group rooms.
  *
- * `charges` is deliberately the ONLY payment table for new money — a paid row
- * is both the receipt and the entitlement (purpose + ref_id points at the post
- * or the room it unlocked). Like `payments`, it carries no account FK: money
- * outlives users, and the username snapshots make that safe.
+ * `charges` is the ONLY payment table for money — a paid row is both the
+ * receipt and the entitlement (`purpose` + `ref_id` points at the post, the
+ * room, or the premium subscription it bought). Like `payments`, it carries no
+ * account FK: money outlives users, and the username snapshots make that safe.
+ *
+ * `premium_days` is set only on `purpose = 'premium'` rows and is stamped at
+ * creation time, so a later edit to the Settings price/period can never change
+ * what an already-prompted buyer was promised (see `commerce.resolveTarget`).
  *
  * `wallets.balance` is only ever moved with `UPDATE … SET balance = balance ± ?`
  * inside `socialStore`, so two simultaneous sales can never corrupt it.
@@ -290,6 +302,7 @@ const SCHEMA_CHARGES = `
     currency            CHAR(3)          NOT NULL DEFAULT 'KES',
     commission          DECIMAL(10,2)    NOT NULL DEFAULT 0,
     net                 DECIMAL(10,2)    NOT NULL DEFAULT 0,
+    premium_days        SMALLINT UNSIGNED NULL DEFAULT NULL,
     status              VARCHAR(12)      NOT NULL DEFAULT 'pending',
     checkout_request_id VARCHAR(64)      NULL DEFAULT NULL,
     merchant_request_id VARCHAR(64)      NULL DEFAULT NULL,
@@ -336,6 +349,62 @@ const SCHEMA_WALLET_ENTRIES = `
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 `;
 
+/**
+ * Follows and creator subscriptions.
+ *
+ * `follows` is the free relationship (a creator's audience). `creator_subs`
+ * is the creator's own offer — enabled or not, and at what price/period.
+ * `subscriptions` is one row per subscriber/creator pair; renewals extend
+ * `expires_at` in place, so there is never a second live row to reconcile.
+ *
+ * A subscription is paid through the same `charges` ledger as posts and rooms
+ * (`purpose = 'sub'`, `ref_id = creator account id`), which is what makes the
+ * M-PESA callback, the status poll and the dashboard reconcile identically.
+ */
+const SCHEMA_FOLLOWS = `
+  CREATE TABLE IF NOT EXISTS follows (
+    follower_id INT UNSIGNED NOT NULL,
+    creator_id  INT UNSIGNED NOT NULL,
+    created_at  TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (follower_id, creator_id),
+    KEY idx_follows_creator (creator_id, created_at)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+`;
+
+const SCHEMA_CREATOR_SUBS = `
+  CREATE TABLE IF NOT EXISTS creator_subs (
+    account_id  INT UNSIGNED     NOT NULL,
+    enabled     TINYINT(1)       NOT NULL DEFAULT 0,
+    price       DECIMAL(10,2)    NOT NULL DEFAULT 0,
+    currency    CHAR(3)          NOT NULL DEFAULT 'KES',
+    period_days SMALLINT UNSIGNED NOT NULL DEFAULT 30,
+    perk        VARCHAR(160)     NOT NULL DEFAULT '',
+    updated_at  TIMESTAMP        NOT NULL DEFAULT CURRENT_TIMESTAMP
+                  ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (account_id)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+`;
+
+const SCHEMA_SUBSCRIPTIONS = `
+  CREATE TABLE IF NOT EXISTS subscriptions (
+    id            INT UNSIGNED     NOT NULL AUTO_INCREMENT,
+    subscriber_id INT UNSIGNED     NOT NULL,
+    creator_id    INT UNSIGNED     NOT NULL,
+    status        VARCHAR(12)      NOT NULL DEFAULT 'active',
+    price         DECIMAL(10,2)    NOT NULL DEFAULT 0,
+    currency      CHAR(3)          NOT NULL DEFAULT 'KES',
+    period_days   SMALLINT UNSIGNED NOT NULL DEFAULT 30,
+    charge_id     INT UNSIGNED     NULL DEFAULT NULL,
+    started_at    TIMESTAMP        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at    DATETIME         NULL DEFAULT NULL,
+    canceled_at   DATETIME         NULL DEFAULT NULL,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_subscriber_creator (subscriber_id, creator_id),
+    KEY idx_sub_creator (creator_id, status, expires_at),
+    KEY idx_sub_expires (expires_at)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+`;
+
 const SCHEMA_ROOMS = `
   CREATE TABLE IF NOT EXISTS rooms (
     id              INT UNSIGNED     NOT NULL AUTO_INCREMENT,
@@ -367,6 +436,17 @@ const ACCOUNT_COLUMNS = [
   ['banned_at', 'DATETIME NULL DEFAULT NULL'],
   ['premium_until', 'DATETIME NULL DEFAULT NULL'],
   ['last_ip', 'VARCHAR(45) NULL DEFAULT NULL'],
+];
+
+/**
+ * Columns added to the pre-existing `charges` table — `premium_days` when the
+ * subscription moved onto the STK flow.
+ */
+const CHARGE_COLUMNS = [
+  ['premium_days', 'SMALLINT UNSIGNED NULL DEFAULT NULL'],
+  // The period a creator subscription was quoted at, stamped on the charge so
+  // a later price/period edit cannot change what an open prompt buys.
+  ['period_days', 'SMALLINT UNSIGNED NULL DEFAULT NULL'],
 ];
 
 // `VALUES(col)` in the update clause is the MariaDB-compatible upsert form.
@@ -403,6 +483,12 @@ const PURGE_AUDIT = `
   DELETE FROM audit_log WHERE created_at < NOW() - INTERVAL 90 DAY
 `;
 
+/** Expired subscriptions stop granting access; the row stays as history. */
+const PURGE_SUBS = `
+  UPDATE subscriptions SET status = 'expired'
+   WHERE status IN ('active', 'canceled') AND expires_at IS NOT NULL AND expires_at <= NOW()
+`;
+
 /** True when MariaDB has been configured in the environment. */
 function configured(env = process.env) {
   return Boolean(env.MARIADB_DATABASE && env.MARIADB_USER);
@@ -412,19 +498,35 @@ function configured(env = process.env) {
  * TLS options for hosted databases (Aiven and friends require TLS and refuse
  * cleartext connections):
  *
- *   MARIADB_SSL=true            → TLS, don't verify the CA (quick start)
- *   MARIADB_SSL_CA=/path/ca.pem → TLS, verify against that CA (the right way)
+ *   MARIADB_SSL=true            → TLS, verify against the CA store
+ *                                 (Aiven, PlanetScale, RDS… — the default and
+ *                                 the only mode used in production). If the
+ *                                 runtime's CA store does not know the
+ *                                 provider's chain — hosted CAs rotate — the
+ *                                 connection is retried encrypted-but-unverified
+ *                                 rather than refusing to boot; see `init`.
+ *   MARIADB_SSL_CA=/path/ca.pem → TLS, verify against that CA file
+ *   MARIADB_SSL=insecure        → TLS without verification (self-signed dev)
  *   unset / anything else       → plain connection (local MariaDB default)
  */
 function resolveSsl(env) {
   if (env.MARIADB_SSL_CA) {
-    return { ca: fs.readFileSync(env.MARIADB_SSL_CA), rejectUnauthorized: true };
+    return { ca: fs.readFileSync(env.MARIADB_SSL_CA), rejectUnauthorized: !sslRelaxed };
+  }
+  if (env.MARIADB_SSL === 'insecure' || (sslRelaxed && env.MARIADB_SSL)) {
+    return { rejectUnauthorized: false };
   }
   if (env.MARIADB_SSL === 'true' || env.MARIADB_SSL === '1') {
-    return { rejectUnauthorized: false };
+    return { rejectUnauthorized: true };
   }
   return undefined;
 }
+
+/** Set when a verified TLS handshake failed on trust — retry unverified. */
+let sslRelaxed = false;
+
+const TLS_TRUST_ERROR =
+  /self-signed|unable to verify|self signed|certificate (is not|has expired)|unable to get local issuer/i;
 
 /**
  * Open a pool. `database = null` connects without selecting a schema — used
@@ -457,6 +559,73 @@ function openPool(env, database) {
   return p;
 }
 
+/**
+ * Realtime over HTTP (the platform this runs on has no long-lived sockets):
+ * the1v1 queue, active pairs, the per-session inbox every event is written to
+ * and read from by long-poll, and the live room roster. All rows are small and
+ * pruned lazily — nothing here is a source of truth beyond a couple of minutes.
+ */
+const SCHEMA_RT = [
+  `CREATE TABLE IF NOT EXISTS rt_sessions (
+    sid      VARCHAR(64)  NOT NULL PRIMARY KEY,
+    profile  MEDIUMTEXT   NULL,
+    country  VARCHAR(8)   NULL,
+    at       BIGINT       NOT NULL DEFAULT 0,
+    INDEX rt_sessions_at (at)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  `CREATE TABLE IF NOT EXISTS rt_queue (
+    sid       VARCHAR(64) NOT NULL PRIMARY KEY,
+    profile   MEDIUMTEXT  NOT NULL,
+    joined_at BIGINT      NOT NULL DEFAULT 0,
+    INDEX rt_queue_join (joined_at)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  `CREATE TABLE IF NOT EXISTS rt_pairs (
+    call_id   VARCHAR(40) NOT NULL PRIMARY KEY,
+    room_id   VARCHAR(40) NOT NULL,
+    a_sid     VARCHAR(64) NOT NULL,
+    b_sid     VARCHAR(64) NOT NULL,
+    created_at BIGINT     NOT NULL DEFAULT 0,
+    INDEX rt_pairs_a (a_sid),
+    INDEX rt_pairs_b (b_sid)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  `CREATE TABLE IF NOT EXISTS rt_pairlog (
+    room_id  VARCHAR(40) NOT NULL,
+    sid      VARCHAR(64) NOT NULL,
+    ended_at BIGINT      NOT NULL DEFAULT 0,
+    PRIMARY KEY (sid, ended_at)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  `CREATE TABLE IF NOT EXISTS rt_inbox (
+    id         BIGINT       NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    to_sid     VARCHAR(64)  NOT NULL,
+    event      VARCHAR(24)  NOT NULL,
+    payload    MEDIUMTEXT   NULL,
+    created_at BIGINT       NOT NULL DEFAULT 0,
+    INDEX rt_inbox_poll (to_sid, id)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  `CREATE TABLE IF NOT EXISTS rt_roomlive (
+    slug       VARCHAR(80) NOT NULL,
+    sid        VARCHAR(64) NOT NULL,
+    account_id INT         NOT NULL,
+    username   VARCHAR(64) NOT NULL,
+    country    VARCHAR(8)  NOT NULL DEFAULT '',
+    at         BIGINT      NOT NULL DEFAULT 0,
+    PRIMARY KEY (slug, sid),
+    INDEX rt_roomlive_at (at)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+];
+
+/** Paid media lives in the database, not on disk — the host has no writable
+ *  volume and the same bytes must survive a redeploy. LONGBLOB: a short clip
+ *  tops out well under the 4 GB ceiling (uploads are capped at 32 MB anyway). */
+const SCHEMA_MEDIA_BLOBS = `
+  CREATE TABLE IF NOT EXISTS media_blobs (
+    \`key\`    VARCHAR(80) NOT NULL PRIMARY KEY,
+    mime       VARCHAR(48) NOT NULL,
+    data       LONGBLOB    NOT NULL,
+    created_at BIGINT      NOT NULL DEFAULT 0
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+`;
+
 /** Idempotent schema + one cleanup pass, against the current pool. */
 async function applySchema() {
   await pool.query(SCHEMA);
@@ -477,28 +646,39 @@ async function applySchema() {
   await pool.query(SCHEMA_WALLETS);
   await pool.query(SCHEMA_WALLET_ENTRIES);
   await pool.query(SCHEMA_ROOMS);
+  await pool.query(SCHEMA_FOLLOWS);
+  await pool.query(SCHEMA_CREATOR_SUBS);
+  await pool.query(SCHEMA_SUBSCRIPTIONS);
+  for (const stmt of SCHEMA_RT) await pool.query(stmt);
+  await pool.query(SCHEMA_MEDIA_BLOBS);
   await ensureAccountColumns();
+  await ensureChargeColumns();
   await pool.query(PURGE); // one cleanup per boot too
   await pool.query(PURGE_SESSIONS).catch(() => undefined);
   await pool.query(PURGE_AUDIT).catch(() => undefined);
+  await pool.query(PURGE_SUBS).catch(() => undefined);
 }
 
 /**
- * Add any missing `accounts` column (bans, premium, last IP) on a database
- * that predates them. Runs once at boot and is a no-op afterwards.
+ * Add any missing column on a table that predates it. Runs once at boot and
+ * is a no-op afterwards.
  */
-async function ensureAccountColumns() {
+async function ensureColumns(table, columns) {
   const [rows] = await pool.query(
     `SELECT COLUMN_NAME AS name FROM INFORMATION_SCHEMA.COLUMNS
-      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'accounts'`,
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?`,
+    [table],
   );
   const have = new Set(rows.map((r) => String(r.name).toLowerCase()));
-  for (const [column, definition] of ACCOUNT_COLUMNS) {
+  for (const [column, definition] of columns) {
     if (have.has(column)) continue;
-    console.warn(`[store] accounts.${column} missing — adding it`);
-    await pool.query(`ALTER TABLE accounts ADD COLUMN \`${column}\` ${definition}`);
+    console.warn(`[store] ${table}.${column} missing — adding it`);
+    await pool.query(`ALTER TABLE \`${table}\` ADD COLUMN \`${column}\` ${definition}`);
   }
 }
+
+const ensureAccountColumns = () => ensureColumns('accounts', ACCOUNT_COLUMNS);
+const ensureChargeColumns = () => ensureColumns('charges', CHARGE_COLUMNS);
 
 /**
  * Connect, verify, create the schema and start the retention job.
@@ -510,6 +690,26 @@ async function init(env = process.env) {
   const dbName = env.MARIADB_DATABASE;
 
   pool = openPool(env, dbName);
+
+  // Verified TLS first. Hosted providers rotate their CA chains, and a runtime
+  // whose bundle predates the new root cannot verify — the connection then
+  // fails outright. Retry encrypted-but-unverified instead: an unverifiable
+  // database is still encrypted, and the alternative is losing every feature.
+  try {
+    await pool.query('SELECT 1');
+  } catch (err) {
+    if (
+      !sslRelaxed &&
+      resolveSsl(env)?.rejectUnauthorized &&
+      TLS_TRUST_ERROR.test(String(err.message || ''))
+    ) {
+      console.warn('[store] TLS verification failed — reconnecting encrypted but without CA verification');
+      sslRelaxed = true;
+      await close().catch(() => undefined);
+      pool = openPool(env, dbName);
+      await pool.query('SELECT 1').catch(() => undefined); // real errors surface below
+    }
+  }
 
   let probe;
   try {
@@ -542,11 +742,19 @@ async function init(env = process.env) {
     }
   }
 
+  // Disk → database: media must live in rows on a read-only filesystem host.
+  await migrateUploadsToDb().catch((err) =>
+    console.warn('[store] upload migration failed:', err.message),
+  );
+
   purgeTimer = setInterval(() => {
     pool?.query(PURGE).catch((err) => console.error('[store] purge failed:', err.message));
     pool
       ?.query(PURGE_SESSIONS)
       .catch((err) => console.error('[store] session purge failed:', err.message));
+    pool
+      ?.query(PURGE_SUBS)
+      .catch((err) => console.error('[store] subscription purge failed:', err.message));
   }, PURGE_INTERVAL_MS);
   purgeTimer.unref?.();
 
@@ -1076,7 +1284,17 @@ async function updateUserFlags(id, patch = {}) {
 /** Delete an account outright (sessions/passport cascade). Payments survive. */
 async function deleteUser(id) {
   if (!pool) return 0;
-  const [res] = await pool.query('DELETE FROM accounts WHERE id = ?', [Number(id)]);
+  const accountId = Number(id);
+  // Social relationships have no FK on purpose (they mirror the posts tables),
+  // so remove both directions before the account row disappears.
+  await pool
+    .query('DELETE FROM follows WHERE follower_id = ? OR creator_id = ?', [accountId, accountId])
+    .catch(() => undefined);
+  await pool
+    .query('DELETE FROM subscriptions WHERE subscriber_id = ? OR creator_id = ?', [accountId, accountId])
+    .catch(() => undefined);
+  await pool.query('DELETE FROM creator_subs WHERE account_id = ?', [accountId]).catch(() => undefined);
+  const [res] = await pool.query('DELETE FROM accounts WHERE id = ?', [accountId]);
   return res.affectedRows ?? 0;
 }
 
@@ -1101,179 +1319,74 @@ async function accountStats() {
   };
 }
 
-// ── Payments ─────────────────────────────────────────────────────────────────
+/**
+ * Live database footprint for the admin dashboard.
+ *
+ * `table_rows` is InnoDB's estimate, not a `COUNT(*)` — exact counts on a
+ * billion-row table would be a full scan on every dashboard refresh. Sizes are
+ * exact enough for capacity planning (`data_length + index_length`).
+ */
+async function dbStats() {
+  if (!pool) return null;
+  const [[versionRow]] = await pool.query('SELECT VERSION() AS version, DATABASE() AS db');
+  const [tables] = await pool.query(
+    `SELECT table_name AS name,
+            table_rows AS rows_est,
+            data_length AS data_bytes,
+            index_length AS index_bytes
+       FROM information_schema.tables
+      WHERE table_schema = DATABASE()
+      ORDER BY (data_length + index_length) DESC`,
+  );
+  // Some managed MariaDB users cannot read global status/variables. The
+  // footprint is still useful without them, so degrade to zero rather than
+  // failing the whole admin card.
+  let statusRows = [];
+  try {
+    [statusRows] = await pool.query('SHOW GLOBAL STATUS');
+  } catch {
+    statusRows = [];
+  }
+  const status = new Map(statusRows.map((row) => [row.Variable_name, row.Value]));
+  let varRows = [];
+  try {
+    [varRows] = await pool.query('SHOW VARIABLES');
+  } catch {
+    varRows = [];
+  }
+  const vars = new Map(varRows.map((row) => [row.Variable_name, row.Value]));
 
-function mapPayment(row) {
-  if (!row) return null;
+  const mapped = tables.map((row) => {
+    const dataBytes = Number(row.data_bytes) || 0;
+    const indexBytes = Number(row.index_bytes) || 0;
+    return {
+      name: row.name,
+      rows: Number(row.rows_est) || 0,
+      dataBytes,
+      indexBytes,
+      totalBytes: dataBytes + indexBytes,
+    };
+  });
+
   return {
-    id: Number(row.id),
-    accountId: Number(row.account_id),
-    username: row.username,
-    amount: Number(row.amount),
-    currency: row.currency,
-    method: row.method,
-    paybill: row.paybill,
-    accountNo: row.account_no,
-    providerRef: row.provider_ref || null,
-    status: row.status,
-    note: row.note || null,
-    premiumDays: row.premium_days == null ? null : Number(row.premium_days),
-    reviewedBy: row.reviewed_by == null ? null : Number(row.reviewed_by),
-    reviewedAt: iso(row.reviewed_at),
-    createdAt: iso(row.created_at),
-    /** Convenience for the UI: the payer is gone but the reference remains. */
-    accountExists: Boolean(row.account_exists),
+    version: versionRow?.version || '',
+    database: versionRow?.db || '',
+    totalBytes: mapped.reduce((sum, row) => sum + row.totalBytes, 0),
+    dataBytes: mapped.reduce((sum, row) => sum + row.dataBytes, 0),
+    indexBytes: mapped.reduce((sum, row) => sum + row.indexBytes, 0),
+    tables: mapped,
+    connections: {
+      current: Number(status.get('Threads_connected')) || 0,
+      running: Number(status.get('Threads_running')) || 0,
+      max: Number(vars.get('max_connections')) || 0,
+    },
+    maxAllowedPacket: Number(vars.get('max_allowed_packet')) || 0,
+    innodbPageSize: Number(vars.get('innodb_page_size')) || 0,
+    uptimeSec: Number(status.get('Uptime')) || 0,
   };
 }
 
-/** Rewrite the account number on an open intent (settings/format changed). */
-async function updatePaymentAccountNo(id, accountNo) {
-  if (!pool) return null;
-  await pool.query('UPDATE payments SET account_no = ? WHERE id = ? AND status = ?', [
-    String(accountNo || '').slice(0, 64),
-    Number(id),
-    'pending',
-  ]);
-  return getPayment(id);
-}
-
-/** The open intent for an account — reused so retries get the same reference. */
-async function findPendingPayment(accountId) {
-  if (!pool) return null;
-  const [rows] = await pool.query(
-    `SELECT p.*, (a.id IS NOT NULL) AS account_exists
-       FROM payments p LEFT JOIN accounts a ON a.id = p.account_id
-      WHERE p.account_id = ? AND p.status = 'pending'
-      ORDER BY p.id DESC LIMIT 1`,
-    [Number(accountId)],
-  );
-  return mapPayment(rows[0]);
-}
-
-async function insertPayment({
-  accountId,
-  username,
-  amount,
-  currency,
-  paybill,
-  accountNo,
-  providerRef = null,
-  premiumDays = null,
-}) {
-  if (!pool) {
-    const err = new Error('database not ready');
-    err.code = 'DB_UNAVAILABLE';
-    throw err;
-  }
-  const [res] = await pool.query(
-    `INSERT INTO payments
-       (account_id, username, amount, currency, method, paybill, account_no, provider_ref, premium_days)
-     VALUES (?, ?, ?, ?, 'paybill', ?, ?, ?, ?)`,
-    [
-      Number(accountId),
-      String(username).slice(0, 64),
-      Number(amount) || 0,
-      currency || 'KES',
-      String(paybill || '').slice(0, 24),
-      String(accountNo || '').slice(0, 64),
-      providerRef ? String(providerRef).slice(0, 64) : null,
-      premiumDays == null ? null : Number(premiumDays),
-    ],
-  );
-  return getPayment(res.insertId);
-}
-
-async function getPayment(id) {
-  if (!pool) return null;
-  const [rows] = await pool.query(
-    `SELECT p.*, (a.id IS NOT NULL) AS account_exists
-       FROM payments p LEFT JOIN accounts a ON a.id = p.account_id
-      WHERE p.id = ? LIMIT 1`,
-    [Number(id)],
-  );
-  return mapPayment(rows[0]);
-}
-
-async function listPayments({ status = '', page = 1, size = 25 } = {}) {
-  if (!pool) return { items: [], total: 0 };
-  const where = [];
-  const params = [];
-  if (status) {
-    where.push('p.status = ?');
-    params.push(String(status));
-  }
-  const clause = where.length ? `WHERE ${where.join(' AND ')}` : '';
-  const safeSize = Math.min(100, Math.max(1, Number(size) || 25));
-  const safePage = Math.max(1, Number(page) || 1);
-
-  const [countRows] = await pool.query(
-    `SELECT COUNT(*) AS n FROM payments p ${clause}`,
-    params,
-  );
-  const [rows] = await pool.query(
-    `SELECT p.*, (a.id IS NOT NULL) AS account_exists
-       FROM payments p LEFT JOIN accounts a ON a.id = p.account_id
-       ${clause}
-      ORDER BY p.id DESC
-      LIMIT ${safeSize} OFFSET ${(safePage - 1) * safeSize}`,
-    params,
-  );
-  return { items: rows.map(mapPayment), total: Number(countRows[0].n) || 0 };
-}
-
-/**
- * Move a payment to `approved` / `rejected` / back to `pending`.
- * Approval is where premium is granted — `premium_until` is bumped by the
- * payment's own recorded `premium_days`, so a later settings change can never
- * retroactively alter what someone paid for.
- */
-async function reviewPayment(id, { status, note = null, adminId = null }) {
-  if (!pool) return null;
-  const allowed = new Set(['pending', 'approved', 'rejected']);
-  if (!allowed.has(status)) {
-    throw Object.assign(new Error('bad status'), { code: 'BAD_INPUT' });
-  }
-
-  const [rows] = await pool.query('SELECT * FROM payments WHERE id = ? LIMIT 1', [Number(id)]);
-  const row = rows[0];
-  if (!row) return null;
-
-  // Only an approval that has not been applied yet grants premium — approving
-  // twice (or re-opening a rejected row) must not extend anything twice.
-  const granting = status === 'approved' && row.status !== 'approved';
-
-  await pool.query(
-    `UPDATE payments
-        SET status = ?, note = ?, reviewed_by = ?, reviewed_at = NOW()
-      WHERE id = ?`,
-    [status, note ? String(note).slice(0, 255) : null, adminId, Number(id)],
-  );
-
-  if (granting) {
-    const days = row.premium_days == null ? 0 : Number(row.premium_days);
-    if (days > 0) {
-      await pool.query(
-        `UPDATE accounts
-            SET premium_until = DATE_ADD(GREATEST(COALESCE(premium_until, NOW()), NOW()), INTERVAL ? DAY)
-          WHERE id = ?`,
-        [days, Number(row.account_id)],
-      );
-    }
-  }
-
-  return getPayment(id);
-}
-
-async function listPaymentsForAccount(accountId) {
-  if (!pool) return [];
-  const [rows] = await pool.query(
-    `SELECT p.*, (a.id IS NOT NULL) AS account_exists
-       FROM payments p LEFT JOIN accounts a ON a.id = p.account_id
-      WHERE p.account_id = ? ORDER BY p.id DESC LIMIT 50`,
-    [Number(accountId)],
-  );
-  return rows.map(mapPayment);
-}
+// ── Legacy paybill ledger ────────────────────────────────────────────────────
 
 /** Ledger totals + a 14-day series for the dashboard's revenue chart. */
 async function paymentSummary() {
@@ -1378,6 +1491,61 @@ function safeParse(text) {
 }
 
 /**
+ * Paid-media blobs: the bytes behind `posts.media_key`. Stored in the
+ * database because the runtime filesystem is read-only in production.
+ */
+async function saveMediaBlob(key, mime, buffer) {
+  await query(
+    `INSERT INTO media_blobs (\`key\`, mime, data, created_at)
+     VALUES (?, ?, ?, ?)
+     ON DUPLICATE KEY UPDATE mime = VALUES(mime), data = VALUES(data)`,
+    [key, mime, buffer, Date.now()],
+  );
+  return key;
+}
+
+async function getMediaBlob(key) {
+  const rows = await query('SELECT mime, data FROM media_blobs WHERE `key` = ?', [key]);
+  return rows[0] || null;
+}
+
+async function deleteMediaBlob(key) {
+  await query('DELETE FROM media_blobs WHERE `key` = ?', [key]);
+}
+
+/**
+ * One-time backfill: move files left over from the disk era into the database
+ * so a host with a read-only filesystem serves every historical post. Runs on
+ * each boot; after the first pass the directory is empty and it no-ops.
+ */
+async function migrateUploadsToDb() {
+  const dir = path.join(__dirname, '..', 'uploads');
+  let files = [];
+  try {
+    files = await fs.promises.readdir(dir);
+  } catch {
+    return; // no legacy uploads directory at all
+  }
+  let moved = 0;
+  for (const key of files) {
+    if (!/^[A-Za-z0-9._-]{4,80}$/.test(key)) continue;
+    try {
+      const data = await fs.promises.readFile(path.join(dir, key));
+      const mime =
+        { '.jpg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp', '.gif': 'image/gif', '.mp4': 'video/mp4', '.webm': 'video/webm' }[
+          path.extname(key).toLowerCase()
+        ] || 'application/octet-stream';
+      await saveMediaBlob(key, mime, data);
+      await fs.promises.unlink(path.join(dir, key));
+      moved += 1;
+    } catch (err) {
+      console.warn(`[store] upload migration skipped ${key}: ${err.message}`);
+    }
+  }
+  if (moved > 0) console.info(`[store] migrated ${moved} upload(s) into the database`);
+}
+
+/**
  * Run one statement on the shared pool.
  *
  * The social layer (`socialStore.js`) owns its own tables but must reuse the
@@ -1432,18 +1600,16 @@ module.exports = {
   updateUserFlags,
   deleteUser,
   accountStats,
-  // Payments
-  findPendingPayment,
-  updatePaymentAccountNo,
-  insertPayment,
-  getPayment,
-  listPayments,
-  reviewPayment,
-  listPaymentsForAccount,
+  dbStats,
+  // Legacy paybill ledger (read-only — see the table's note in SCHEMA_PAYMENTS)
   paymentSummary,
   // Settings + audit
   getSettings,
   putSetting,
   insertAudit,
   listAudit,
+  // Paid-media blobs (database-backed uploads)
+  saveMediaBlob,
+  getMediaBlob,
+  deleteMediaBlob,
 };

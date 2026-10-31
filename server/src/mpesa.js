@@ -41,12 +41,7 @@ function config() {
 function isConfigured() {
   const cfg = config();
   return Boolean(
-    cfg.enabled &&
-      cfg.mode === 'stk' &&
-      cfg.consumerKey &&
-      cfg.consumerSecret &&
-      cfg.shortcode &&
-      cfg.passkey,
+    cfg.enabled && cfg.consumerKey && cfg.consumerSecret && cfg.shortcode && cfg.passkey,
   );
 }
 
@@ -118,6 +113,19 @@ function invalidateToken() {
 // ── STK push ─────────────────────────────────────────────────────────────────
 
 /**
+ * Which rail a prompt bills against.
+ *
+ * The shortcode alone cannot say: a Paybill and a Buy Goods till are both
+ * 5–7 digits, and Safaricom rejects a request that names the wrong one. So
+ * the owner picks the rail in Settings and every push follows that choice.
+ *
+ * @param {{ shortcodeType?: string }} cfg
+ * @returns {'CustomerPayBillOnline' | 'CustomerBuyGoodsOnline'}
+ */
+const transactionType = (cfg) =>
+  cfg && cfg.shortcodeType === 'till' ? 'CustomerBuyGoodsOnline' : 'CustomerPayBillOnline';
+
+/**
  * Prompt a phone for payment. Returns the ids the callback will echo back.
  *
  * @param {{ phone: string, amount: number, accountRef: string, description: string }} opts
@@ -137,7 +145,7 @@ async function stkPush({ phone, amount, accountRef, description }) {
     BusinessShortCode: cfg.shortcode,
     Password: password,
     Timestamp: ts,
-    TransactionType: 'CustomerPayBillOnline',
+    TransactionType: transactionType(cfg),
     // Daraja takes whole shillings only — round here so the charge row, the
     // wallet split and the prompt all agree on the same number.
     Amount: shillings,
@@ -235,6 +243,114 @@ async function queryStatus(checkoutRequestId) {
 }
 
 /**
+ * Diagnose the Daraja setup, one requirement at a time.
+ *
+ * "M-PESA is not working" is four different problems with four different
+ * fixes, and this reports each one separately so the owner never has to
+ * guess which. `ok` is tri-state: `true` passed, `false` is broken, `null`
+ * is "cannot judge until the earlier requirements are met".
+ *
+ * Pass a `phone` for the only honest end-to-end proof: a real KES 1 prompt.
+ * Safaricom validates the shortcode, the passkey and the token when it builds
+ * that prompt, so nothing upstream of it can lie to you.
+ *
+ * @param {{phone?: string}} opts
+ * @returns {Promise<{ ok: boolean, checks: Array<{name:string, ok:boolean|null, message:string}> }>}
+ */
+async function testConnection({ phone } = {}) {
+  const cfg = config();
+  const checks = [];
+  const add = (name, ok, message) => checks.push({ name, ok, message });
+
+  add(
+    'enabled',
+    Boolean(cfg.enabled),
+    cfg.enabled
+      ? 'M-PESA is switched on in Settings.'
+      : 'M-PESA is switched off — turn it on in Settings.',
+  );
+  add(
+    'credentials',
+    Boolean(cfg.consumerKey && cfg.consumerSecret),
+    cfg.consumerKey && cfg.consumerSecret
+      ? 'Consumer key and secret are set.'
+      : 'The consumer key and secret from the Daraja app are missing.',
+  );
+  add(
+    'shortcode',
+    Boolean(cfg.shortcode),
+    cfg.shortcode
+      ? `Shortcode ${cfg.shortcode} is set (${cfg.shortcodeType === 'till' ? 'Buy Goods till' : 'Paybill'}).`
+      : 'No shortcode. STK push bills against a Paybill or Till number — Safaricom ' +
+        'rejects the request without one. Register a Paybill and tell Safaricom to ' +
+        'settle it to your M-PESA number: that is what makes your number the one ' +
+        'that receives the cash.',
+  );
+  add(
+    'passkey',
+    Boolean(cfg.passkey),
+    cfg.passkey
+      ? 'The Lipa na M-PESA passkey is set.'
+      : 'The Lipa na M-PESA Online passkey is missing — it is the long string ' +
+        'Safaricom issues with the shortcode, not your account password.',
+  );
+  add(
+    'callback',
+    /^https:\/\//i.test(String(cfg.callbackUrl || '')),
+    /^https:\/\//i.test(String(cfg.callbackUrl || ''))
+      ? `Safaricom will report results to ${cfg.callbackUrl}.`
+      : 'The callback URL must be a public https address — Safaricom refuses plain ' +
+        'http, and without a reachable callback verification is left to polling.',
+  );
+
+  // The only check that actually talks to Safaricom.
+  let reachable = false;
+  if (cfg.consumerKey && cfg.consumerSecret) {
+    try {
+      await getAuthToken({ force: true });
+      reachable = true;
+      add('token', true, 'Safaricom accepted the credentials and issued a token.');
+    } catch (err) {
+      add('token', false, err.message);
+    }
+  } else {
+    add('token', null, 'Not tested — add the consumer key and secret first.');
+  }
+
+  if (phone) {
+    const ready = cfg.shortcode && cfg.passkey && reachable;
+    if (!ready) {
+      add(
+        'stk',
+        null,
+        'Not tested — a working token, a shortcode and a passkey are needed first.',
+      );
+    } else {
+      try {
+        const ids = await stkPush({
+          phone,
+          amount: 1,
+          accountRef: 'TEST',
+          description: 'Test',
+        });
+        add(
+          'stk',
+          true,
+          `Prompt sent — check the phone. Enter the PIN to complete a real KES 1 ` +
+            `payment (${ids.checkoutRequestId}).`,
+        );
+      } catch (err) {
+        add('stk', false, err.message);
+      }
+    }
+  } else {
+    add('stk', null, 'Not tested — send a phone number to fire a real KES 1 prompt.');
+  }
+
+  return { ok: checks.every((check) => check.ok !== false), checks };
+}
+
+/**
  * Normalize the callback Daraja POSTs to `/api/mpesa/callback`.
  * Accepts both the current shape and the older wrapped one, so a sandbox
  * account on either version still settles.
@@ -276,7 +392,9 @@ module.exports = {
   getAuthToken,
   invalidateToken,
   stkPush,
+  transactionType,
   queryStatus,
+  testConnection,
   parseCallback,
   ACK,
   NACK,

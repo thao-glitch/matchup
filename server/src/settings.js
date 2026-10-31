@@ -1,12 +1,18 @@
 /**
  * App settings — everything the owner can change without a redeploy:
  *
- *   • `payment`  — the paybill the app tells people to pay into (bank, number,
- *                  account-number format, price, premium length, wording).
+ *   • `payment`  — the premium subscription: price, period, product name and
+ *                  the wording shown on the pay screen.
  *   • `features` — feature switches (ads, sign-ups, payments, maintenance).
  *   • `commerce` — the social platform: which tabs exist, what a post costs,
  *                  and the commission ("tax") the house keeps on every sale.
  *   • `mpesa`    — Daraja STK push credentials (secrets: masked on read).
+ *
+ * Every payment on the platform is an M-PESA STK push: the buyer's phone
+ * prompts for its PIN and the Daraja callback settles the charge. There is no
+ * paybill to read off a bank statement and nothing for the owner to approve,
+ * so this document holds no account numbers or bank names any more — the only
+ * bank-side detail that matters is the shortcode, and that lives in `mpesa`.
  *
  * Stored as JSON documents in the `settings` table, served read-only to
  * every client through `GET /api/config`, and edited only by an admin through
@@ -22,25 +28,20 @@ const mariaStore = require('./mariaStore');
 /**
  * Defaults the app boots with, and the fallback whenever a key is missing.
  *
- * `accountFormat` is a template rendered against the signed-in account:
- * `{id}` → the numeric account id, `{username}` → their username. DTB shows
- * this as the "Account Number" on the payment confirmation, which is exactly
- * how a payment gets matched back to a user.
+ * `payment` is the subscription the STK prompt collects: price, period, and
+ * the name printed on the button. The `Account Number` template that used to
+ * live here is gone — nothing matches a statement by hand any more.
  */
 const DEFAULTS = {
   payment: {
     enabled: true,
-    bank: 'Diamond Trust Bank (DTB)',
-    paybill: '',
-    accountFormat: 'MU{id}',
     amount: 500,
     currency: 'KES',
     productName: 'Matchup Premium',
     premiumDays: 30,
     instructions:
-      'Pay with the paybill above using your bank app or M-PESA. Enter your unique ' +
-      'account number, then come back and confirm — an admin releases your access ' +
-      'once the money shows on the statement.',
+      'Press pay and your phone prompts you for the M-PESA PIN. Premium switches ' +
+      'on the moment you confirm — there is nothing to send us afterwards.',
     supportContact: '',
   },
   features: {
@@ -60,18 +61,29 @@ const DEFAULTS = {
     maxPrice: 15000,
     currency: 'KES',
   },
-  /** M-PESA Daraja (STK push) — secrets stay in this document, never public. */
+  /**
+   * M-PESA Daraja (STK push) — secrets stay in this document, never public.
+   *
+   * `shortcode` + `passkey` are the pair that makes a prompt possible at all:
+   * Safaricom bills against the shortcode and signs the request with the
+   * Lipa na M-PESA passkey. The owner settles that shortcode's balance to
+   * their own M-PESA number on Safaricom's side.
+   */
   mpesa: {
     enabled: false,
-    mode: 'stk',
     consumerKey: '',
     consumerSecret: '',
     shortcode: '',
+    /**
+     * Which rail the shortcode sits on. STK push has to name it in every
+     * request — `CustomerPayBillOnline` bills a Paybill, `CustomerBuyGoodsOnline`
+     * bills a Buy Goods till — and Safaricom rejects the mismatch outright, so
+     * this is a choice the owner makes once, next to the shortcode itself.
+     */
+    shortcodeType: 'paybill',
     passkey: '',
     baseUrl: 'https://sandbox.safaricom.co.ke',
     callbackUrl: '',
-    paybill: '',
-    accountFormat: 'MU{id}',
     description: 'Matchup',
   },
 };
@@ -116,13 +128,6 @@ function sanitizePayment(raw, current) {
   const src = raw && typeof raw === 'object' ? raw : {};
   return {
     enabled: cleanBool(src.enabled, base.enabled),
-    bank: cleanText(src.bank ?? base.bank, 80) || DEFAULTS.payment.bank,
-    // Paybill numbers are digits (Safaricom) or digits+letters (some banks).
-    paybill: cleanText(src.paybill ?? base.paybill, 24).replace(/[^A-Za-z0-9-]/g, ''),
-    accountFormat: cleanText(src.accountFormat ?? base.accountFormat, 48).replace(
-      /[^A-Za-z0-9{_}\-]/g,
-      '',
-    ) || DEFAULTS.payment.accountFormat,
     amount: cleanInt(src.amount ?? base.amount, 1, 1_000_000, DEFAULTS.payment.amount),
     currency: (cleanText(src.currency ?? base.currency, 3) || 'KES').toUpperCase(),
     productName: cleanText(src.productName ?? base.productName, 60) || DEFAULTS.payment.productName,
@@ -182,20 +187,17 @@ function sanitizeMpesa(raw, current) {
     if (MPESA_SECRETS.includes(key) && text.includes(MASK)) return base[key];
     return text;
   };
-  const mode = cleanText(src.mode ?? base.mode, 8) === 'manual' ? 'manual' : 'stk';
   return {
     enabled: cleanBool(src.enabled, base.enabled),
-    mode,
     consumerKey: pick('consumerKey', 120),
     consumerSecret: pick('consumerSecret', 120),
     shortcode: pick('shortcode', 24).replace(/[^A-Za-z0-9]/g, ''),
+    // Anything but `till` means Paybill — a stored document predating this
+    // field loads as the paybill behaviour it always had.
+    shortcodeType: (src.shortcodeType ?? base.shortcodeType) === 'till' ? 'till' : 'paybill',
     passkey: pick('passkey', 200),
     baseUrl: normalizeBaseUrl(cleanText(src.baseUrl ?? base.baseUrl, 120) || DEFAULTS.mpesa.baseUrl),
     callbackUrl: cleanText(src.callbackUrl ?? base.callbackUrl, 240),
-    paybill: pick('paybill', 24).replace(/[^A-Za-z0-9-]/g, ''),
-    accountFormat:
-      cleanText(src.accountFormat ?? base.accountFormat, 48).replace(/[^A-Za-z0-9{_}\-]/g, '') ||
-      DEFAULTS.mpesa.accountFormat,
     description: cleanText(src.description ?? base.description, 40) || DEFAULTS.mpesa.description,
   };
 }
@@ -293,8 +295,8 @@ function adminView() {
 
 /**
  * What every client may read from `GET /api/config`.
- * Nothing sensitive lives in here — it is the same information the lobby
- * renders on screen, plus the switches that decide what the lobby shows.
+ * Nothing sensitive lives in here — it is the same information the pay screen
+ * renders, plus the switches that decide what the lobby shows.
  */
 function publicConfig() {
   const { payment, features, commerce, mpesa } = cache;
@@ -302,9 +304,6 @@ function publicConfig() {
     features: { ...features },
     payment: {
       enabled: Boolean(payment.enabled && features.premium),
-      bank: payment.bank,
-      paybill: payment.paybill,
-      accountFormat: payment.accountFormat,
       amount: payment.amount,
       currency: payment.currency,
       productName: payment.productName,
@@ -314,7 +313,11 @@ function publicConfig() {
     },
     /**
      * The social platform as the app renders it: which tabs exist, what the
-     * house keeps, and how a payment is taken (STK push vs. paybill+approve).
+     * house keeps, and whether M-PESA can actually take money right now.
+     *
+     * `mpesaReady` is the honest gate — every payment is an STK push, so a
+     * missing shortcode means the Pay button has to explain itself instead of
+     * firing a prompt Safaricom will refuse.
      */
     commerce: {
       enabled: Boolean(commerce.enabled),
@@ -325,22 +328,15 @@ function publicConfig() {
       minPrice: commerce.minPrice,
       maxPrice: commerce.maxPrice,
       currency: commerce.currency,
-      payMode: mpesa.enabled && mpesa.mode === 'stk' ? 'stk' : 'manual',
-      paybill: mpesa.paybill || payment.paybill || '',
+      mpesaReady: Boolean(
+        mpesa.enabled &&
+          mpesa.consumerKey &&
+          mpesa.consumerSecret &&
+          mpesa.shortcode &&
+          mpesa.passkey,
+      ),
     },
   };
-}
-
-/**
- * Render `accountFormat` for one account: `MU{id}` → `MU1042`.
- * Unknown placeholders are removed rather than leaked as literal braces.
- */
-function renderAccountNo(format, { id, username }) {
-  const template = format || DEFAULTS.payment.accountFormat;
-  const out = template
-    .replace(/\{id\}/g, String(Number(id) || 0))
-    .replace(/\{username\}/g, String(username || '').replace(/[^A-Za-z0-9]/g, '').slice(0, 24));
-  return out.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64) || `MU${Number(id) || 0}`;
 }
 
 module.exports = {
@@ -352,7 +348,6 @@ module.exports = {
   save,
   adminView,
   publicConfig,
-  renderAccountNo,
   sanitizePayment,
   sanitizeFeatures,
   sanitizeCommerce,

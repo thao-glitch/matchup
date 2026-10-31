@@ -39,6 +39,8 @@ MARIADB_PASSWORD=…
 MARIADB_DATABASE=defaultdb
 MARIADB_SSL=true
 
+# Optional object storage for post media (production recommended):
+# BLOB_READ_WRITE_TOKEN=vercel_blob_rw_...
 ADMIN_USERNAME=owner                      # first /admin login (used once, at first boot)
 ADMIN_PASSWORD=choose-a-long-secret-here  # 10+ characters
 ```
@@ -79,6 +81,7 @@ it, and — if `KOYEB_TOKEN` is set — asks Koyeb to pick up the new image.
    | `MARIADB_HOST` / `MARIADB_PORT` / `MARIADB_USER` / `MARIADB_PASSWORD` / `MARIADB_DATABASE` / `MARIADB_SSL` | from `.deploy.env` (Aiven) |
    | `ADMIN_USERNAME` | your dashboard username |
    | `ADMIN_PASSWORD` | your dashboard password (10+ chars) |
+   | `BLOB_READ_WRITE_TOKEN` | Vercel Blob read/write token; keeps uploads out of MariaDB. Connect a Blob store in Vercel → Storage → Connect to Project. |
    | `CORS_ORIGIN` | *optional* — only needed if you later serve the client from a second origin |
    | `CF_TURN_KEY_ID` / `CF_TURN_KEY_SECRET` | *optional* — step 4 |
 
@@ -112,22 +115,31 @@ Open `https://<app>-<id>.koyeb.app/admin` and sign in with `ADMIN_USERNAME` /
 `ADMIN_PASSWORD` from `.deploy.env`. From then on the dashboard owns its own
 credentials — change the password in **Settings**, not in the environment.
 
-The dashboard gives you: live users and queue, the call telemetry, the paybill
-ledger, feature switches (ads / sign-ups / payments / maintenance), ban &
-premium controls, and the audit trail of everything you did.
+The dashboard gives you: live users and queue, the call telemetry, the
+payments ledger, feature switches (ads / sign-ups / payments / maintenance),
+ban & premium controls, and the audit trail of everything you did.
 
 > If you never set `ADMIN_*`, no admin exists and `/admin` will only ever show
 > the login form. Set the two variables and restart the service to create one
 > (it only ever bootstraps while the admin table is empty).
 
-## 6. Payments (paybill)
+## 6. Payments (M-PESA STK push)
 
-The lobby ships with a paybill panel driven entirely by
-**`/admin` → Settings** (bank, paybill number, account-number format, price,
-premium length, wording). Nothing is hard-coded and nothing needs a redeploy.
+The lobby ships with an M-PESA panel driven entirely by **`/admin` →
+Settings** (price, premium length, wording, and the Daraja credentials).
+Nothing is hard-coded and nothing needs a redeploy.
 
-Full walkthrough — including exactly what to ask Diamond Trust Bank for —
-in [docs/PAYMENTS.md](docs/PAYMENTS.md).
+Every payment is an STK push: the buyer's phone prompts for the PIN and the
+callback settles it, so there is nothing for you to approve by hand. The
+money lands in your Paybill's collection account, which you settle to your
+own M-PESA number on Safaricom's side — no business bank account needed.
+
+The **Test connection** button in Settings reports exactly which credential
+is still missing, and can fire a real KES 1 prompt at a phone to prove the
+whole path works.
+
+Full walkthrough — including what to ask Safaricom for — in
+[docs/PAYMENTS.md](docs/PAYMENTS.md).
 
 ## 7. Move existing accounts over (optional, 3 min)
 

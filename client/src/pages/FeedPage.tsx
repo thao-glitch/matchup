@@ -12,6 +12,9 @@ import type { PageProps } from '../shell/pageProps';
 import type { Post } from '../types/social';
 import { SocialError, formatKes, likePost, listPosts, timeAgo } from '../lib/social';
 import { Link, navigate } from '../lib/router';
+import { mediaSrc } from '../lib/mediaUrl';
+import MediaImg from '../components/MediaImg';
+import CreatorActions from '../components/CreatorActions';
 import {
   CommentIcon,
   GlobeIcon,
@@ -262,7 +265,15 @@ export default function FeedPage({
         <>
           <div className="space-y-4">
             {items.map((post) => (
-              <PostCard key={post.id} post={post} onLike={toggleLike} onComment={(p) => navigate(`/post/${p.id}`)} />
+              <PostCard
+                key={post.id}
+                post={post}
+                account={account}
+                config={config}
+                requireAuth={requireAuth}
+                onLike={toggleLike}
+                onComment={(p) => navigate(`/post/${p.id}`)}
+              />
             ))}
           </div>
 
@@ -291,6 +302,9 @@ export default function FeedPage({
 
 interface PostCardProps {
   post: Post;
+  account: PageProps['account'];
+  config: PageProps['config'];
+  requireAuth: PageProps['requireAuth'];
   onLike: (post: Post) => void;
   onComment: (post: Post) => void;
 }
@@ -300,10 +314,17 @@ interface PostCardProps {
  * paywall never carries its own link — the paywall lives on the detail page),
  * so anything interactive inside stops propagation.
  */
-function PostCard({ post, onLike, onComment }: PostCardProps) {
+function PostCard({ post, account, config, requireAuth, onLike, onComment }: PostCardProps) {
   const locked = post.price > 0 && !post.owned;
   const hideMedia = post.type === 'image' || post.type === 'video';
   const open = () => navigate(`/post/${post.id}`);
+  const showActions = !post.creatorBanned && account?.id !== post.creatorId;
+  const offer = post.creatorSubscription ?? {
+    enabled: false,
+    price: 0,
+    currency: post.currency,
+    periodDays: 30,
+  };
 
   return (
     <article
@@ -321,8 +342,30 @@ function PostCard({ post, onLike, onComment }: PostCardProps) {
           </span>
         </span>
         <div className="min-w-0 flex-1">
-          <p className="truncate text-sm font-semibold text-ink">@{post.creatorName}</p>
+          <Link
+            to={`/creator/${post.creatorId}`}
+            onClick={(event) => event.stopPropagation()}
+            className="block truncate text-sm font-semibold text-ink hover:underline"
+          >
+            @{post.creatorName}
+          </Link>
           <p className="text-xs text-muted">{timeAgo(post.createdAt)}</p>
+          {showActions && (
+            <div className="mt-1.5">
+              <CreatorActions
+                creatorId={post.creatorId}
+                creatorName={post.creatorName}
+                creatorBanned={post.creatorBanned}
+                following={Boolean(post.creatorFollowing)}
+                subscribed={Boolean(post.creatorSubscribed)}
+                offer={offer}
+                account={account}
+                config={config}
+                requireAuth={requireAuth}
+                compact
+              />
+            </div>
+          )}
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
           {post.isAdult && (
@@ -343,10 +386,9 @@ function PostCard({ post, onLike, onComment }: PostCardProps) {
       {hideMedia && (
         <div className="mt-3">
           {post.mediaUrl && post.type === 'image' && (
-            <img
-              src={post.mediaUrl}
+            <MediaImg
+              src={mediaSrc(post.mediaUrl)}
               alt={post.caption || 'Post image'}
-              loading="lazy"
               className="photo max-h-[70vh] w-full"
             />
           )}
@@ -354,7 +396,7 @@ function PostCard({ post, onLike, onComment }: PostCardProps) {
             /* Controls stay clickable in the feed: without this the play
                button's click would bubble into the card's navigation. */
             <video
-              src={post.mediaUrl}
+              src={mediaSrc(post.mediaUrl)}
               controls
               playsInline
               preload="metadata"

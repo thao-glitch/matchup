@@ -6,11 +6,10 @@
  *
  *   • `features` — the switches that decide what the lobby shows at all
  *     (ads, sign-ups, payments) plus the maintenance kill switch.
- *   • `payment`  — the paybill block: bank, number, unique account-number
- *     format, price, premium length and the wording of the instructions.
+ *   • `payment`  — the premium subscription: price, period, product name and
+ *     the wording shown on the pay screen.
  *   • `commerce` — the social platform: which tabs exist, the commission the
- *     house keeps on a sale, and whether payments run as an STK push or a
- *     manual paybill approval.
+ *     house keeps on a sale, and whether Daraja can take a payment at all.
  *
  * The endpoint is public on purpose: none of it is a secret (it is rendered
  * on screen for everyone), and caching it in this module keeps the lobby from
@@ -23,9 +22,6 @@ import type { CommerceConfig } from '../types/social';
 export interface PaymentConfig {
   /** False when payments are switched off OR the premium feature is off. */
   enabled: boolean;
-  bank: string;
-  paybill: string;
-  accountFormat: string;
   amount: number;
   currency: string;
   productName: string;
@@ -44,6 +40,13 @@ export interface PublicConfig {
   payment: PaymentConfig;
   /** The social platform's switches and economics (posts, rooms, commission). */
   commerce: CommerceConfig;
+  /** Where uploads go. `directUpload` means the browser talks to Blob directly. */
+  media: {
+    backend: string;
+    objectStorage: boolean;
+    private: boolean;
+    directUpload: boolean;
+  };
 }
 
 const BASE = `${SIGNALING_URL.replace(/\/$/, '')}/api/config`;
@@ -53,9 +56,6 @@ export const DEFAULT_CONFIG: PublicConfig = {
   features: { signup: true, ads: true, premium: true, maintenance: false },
   payment: {
     enabled: false,
-    bank: '',
-    paybill: '',
-    accountFormat: 'MU{id}',
     amount: 0,
     currency: 'KES',
     productName: 'Premium',
@@ -72,9 +72,9 @@ export const DEFAULT_CONFIG: PublicConfig = {
     minPrice: 5,
     maxPrice: 15000,
     currency: 'KES',
-    payMode: 'manual',
-    paybill: '',
+    mpesaReady: false,
   },
+  media: { backend: 'database', objectStorage: false, private: false, directUpload: false },
 };
 
 let cached: PublicConfig | null = null;
@@ -86,6 +86,7 @@ function normalize(data: Partial<PublicConfig> | null): PublicConfig {
     features: { ...DEFAULT_CONFIG.features, ...(src.features ?? {}) },
     payment: { ...DEFAULT_CONFIG.payment, ...(src.payment ?? {}) },
     commerce: { ...DEFAULT_CONFIG.commerce, ...(src.commerce ?? {}) },
+    media: { ...DEFAULT_CONFIG.media, ...(src.media ?? {}) },
   };
 }
 

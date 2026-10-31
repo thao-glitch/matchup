@@ -21,12 +21,11 @@ net          = gross − commission                             ← credited to 
 The platform keeps `commission` on every settled charge. Creators see the
 split before they set a price and in their wallet.
 
-Two payment modes (`mpesa.mode`, set in `/admin` → Settings):
-
-| Mode | Behaviour |
-| --- | --- |
-| `stk` | Daraja STK push — the phone prompts for the PIN, the callback settles the charge automatically. |
-| `manual` | No callback exists: the charge stays `pending` with paybill instructions and the owner approves it in `/admin` → Earnings (same ritual as the paybill ledger). |
+Every payment — premium, a post, a room — is a Daraja **STK push**: the phone
+prompts for the PIN and the callback settles the charge. There is no manual
+mode any more, so a charge only ever leaves `pending` by being settled (by
+the callback, by a poll, or by the owner clicking settle on a callback that
+never arrived).
 
 Settings docs (all edited through `PUT /api/admin/settings`):
 
@@ -46,27 +45,30 @@ Settings docs (all edited through `PUT /api/admin/settings`):
 // key: "mpesa"
 {
   "enabled": false,
-  "mode": "stk",                  // "stk" | "manual"
   "consumerKey": "",              // Daraja — masked as "••••" on read
   "consumerSecret": "",           // masked
-  "shortcode": "",                // e.g. 174379 (sandbox)
-  "passkey": "",                  // masked
+  "shortcode": "",                // your Paybill — required, e.g. 174379 (sandbox)
+  "passkey": "",                  // masked — the Lipa na M-PESA Online passkey
   "baseUrl": "https://sandbox.safaricom.co.ke",
   "callbackUrl": "",              // https://<host>/api/mpesa/callback
-  "paybill": "",                  // manual mode: the number to pay into
-  "accountFormat": "MU{id}",      // manual mode reference template
   "description": "Matchup"
 }
 ```
+
+Without a `shortcode` and `passkey` no charge can be opened at all —
+`createCharge` refuses with `mpesa-not-configured` before writing a row,
+because a prompt that could never be sent must not leave a pending charge
+behind. `/admin` → Settings → **Test connection** reports which requirement
+is outstanding and can fire a real KES 1 prompt to prove it end to end.
 
 `GET /api/config` additionally returns a **public** `commerce` block:
 
 ```jsonc
 commerce: {
   enabled, social, groups, adult, commissionRate, minPrice, maxPrice, currency,
-  payMode: "stk" | "manual",   // mirrored from mpesa.mode
-  paybill: ""                  // manual mode reference shown on the pay sheet
+  mpesaReady: false   // credentials + shortcode + passkey all present
 }
+```
 ```
 
 No secrets ever leave the server. Secrets written back containing `••••` are
@@ -90,15 +92,34 @@ wallets(account_id PK, balance, lifetime_in, lifetime_out, updated_at)
 wallet_entries(id, account_id, amount, kind, status, charge_id, memo, created_at)
 rooms(id, slug UNIQUE, title, kind, host_account_id, host_username, price,
       currency, is_adult, max_participants, status, created_at, ended_at)
+follows(follower_id, creator_id, created_at, PRIMARY KEY(follower_id, creator_id))
+creator_subs(account_id PK, enabled, price, currency, period_days, perk, updated_at)
+subscriptions(id, subscriber_id, creator_id, status, price, currency, period_days,
+              charge_id, started_at, expires_at, canceled_at,
+              UNIQUE(subscriber_id, creator_id))
 ```
 
 * `charges` is the payment instrument for **everything new** (purpose:
-  `post` | `room`) — entitlement = a `paid` charge for that `ref_id` and buyer.
+  `post` | `room` | `sub` | `premium`) — entitlement = a `paid` charge for
+  that `ref_id` and buyer. A `sub` charge points at the creator account and
+  carries the quoted `period_days`.
+* A creator decides whether subscriptions are off, free, or paid
+  (`creator_subs`). An active `subscriptions` row unlocks every paid post by
+  that creator; rooms and platform premium stay charge-only.
+* Post responses carry `creatorFollowing`, `creatorSubscribed` and
+  `creatorSubscription`, so the feed, explore and post-detail cards can offer
+  Follow / Subscribe without an extra creator fetch.
 * No account FK on `charges` (money outlives users), same rule as `payments`.
 * `wallet_entries.kind`: `sale` | `adjustment` | `withdrawal`;
   `status`: `posted` | `pending` | `approved` | `rejected`.
-* Media files live in `server/uploads/` and are **only** served through
-  `GET /api/posts/:id/media`, which enforces the paywall. A *paid* post's
+* Media bytes live in a **private Vercel Blob store** when
+  `BLOB_READ_WRITE_TOKEN` is configured (production); otherwise they fall back
+  to `media_blobs` in MariaDB (local dev / no object storage). The browser
+  uploads directly to Blob through `POST /api/media/direct` (a short-lived
+  client token), so a 32 MB video never has to pass through a serverless
+  function's request-body limit. `media_key` remains the only link in MariaDB.
+  Media is **only** served through `GET /api/posts/:id/media`, which enforces
+  the paywall. A *paid* post's
   `mediaUrl` carries `?t=<claim>` — a signed, post-scoped, 1h statement of who
   the URL was minted for (`src/mediaToken.js`). An `<img>`/`<video>` tag cannot
   send a Bearer header, so the claim is the only credential the media route
@@ -112,7 +133,7 @@ rooms(id, slug UNIQUE, title, kind, host_account_id, host_username, price,
 ### Posts
 | Method | Path | Body / query | → |
 | --- | --- | --- | --- |
-| GET | `/api/posts` | `?page&size&q&adult=0\|1` | `{ items: Post[], total, page, size }` |
+| GET | `/api/posts` | `?page&size&q&adult=0\|1&creatorId=` | `{ items: Post[], total, page, size }` |
 | GET | `/api/posts/mine` | `?page&size` | same, own posts incl. hidden |
 | GET | `/api/posts/:id` | | `{ post: Post }` (counts a view) |
 | GET | `/api/posts/:id/media` | `?t=<claim>` for paid media | binary, or 401/402 JSON |
@@ -121,7 +142,8 @@ rooms(id, slug UNIQUE, title, kind, host_account_id, host_username, price,
 | POST | `/api/posts/:id/like` | `{ liked: boolean }` | `{ liked, likes }` |
 | GET | `/api/posts/:id/comments` | | `{ items: Comment[] }` |
 | POST | `/api/posts/:id/comments` | `{ body }` | 201 `{ comment }` |
-| POST | `/api/media` | raw bytes, `Content-Type: image/* \| video/mp4` | 201 `{ key }` (max 32 MB) |
+| POST | `/api/media` | raw bytes, `Content-Type: image/* \| video/mp4` | 201 `{ key }` (max 32 MB; legacy/small uploads) |
+| POST | `/api/media/direct` | Bearer + `{ type, payload }` from `@vercel/blob/client` | Blob client token / upload-completed acknowledgement |
 
 ```ts
 interface Post {
@@ -139,19 +161,31 @@ interface Post {
 interface Comment { id: number; postId: number; username: string; body: string; status: string; createdAt: string; }
 ```
 
+### Creators (follow + subscribe)
+| Method | Path | Body | → |
+| --- | --- | --- | --- |
+| GET | `/api/creators/:id` | | `{ creator }` — counts, offer, viewer state |
+| POST | `/api/creators/:id/follow` | | `{ following, followers }` |
+| DELETE | `/api/creators/:id/follow` | | `{ following, followers }` |
+| GET | `/api/creators/me/subscription` | | `{ subscription }` — own offer |
+| PUT | `/api/creators/me/subscription` | `{ enabled, price, periodDays, perk }` | `{ subscription }` |
+| POST | `/api/creators/:id/subscribe` | `{ phone? }` | 201 `{ subscription }` (free) or `{ charge }` (paid) |
+| DELETE | `/api/creators/:id/subscribe` | | `{ subscription }` — stop renewing, access until expiry |
+
 ### Charges (the STK push)
 | Method | Path | Body | → |
 | --- | --- | --- | --- |
-| POST | `/api/charges` | `{ purpose: 'post'\|'room', refId, phone }` | 201 `{ charge }` |
+| POST | `/api/charges` | `{ purpose: 'post'\|'room'\|'sub', refId, phone }` | 201 `{ charge }` |
 | GET | `/api/charges/:id` | | `{ charge }` (owner only — poll every 3 s) |
 
 ```ts
 interface Charge {
-  id: number; purpose: 'post' | 'room'; refId: number;
+  id: number; purpose: 'post' | 'room' | 'sub' | 'premium'; refId: number;
   amount: number; currency: string; commission: number; net: number;
   status: 'pending' | 'paid' | 'failed' | 'expired';
   phone: string; mpesaRef: string | null; checkoutRequestId: string | null;
   error: string | null; instructions: string | null;
+  periodDays: number | null;  // `sub` only
   createdAt: string; paidAt: string | null;
 }
 ```
@@ -211,6 +245,8 @@ pair (deterministic, no glare); each client runs one `Peer` per remote id.
 
 | Method | Path | Notes |
 | --- | --- | --- |
+| GET | `/api/admin/overview` | dashboard totals, calls, live queue, database footprint, media backend |
+| GET | `/api/admin/db` | MariaDB version, exact data/index sizes, table estimates, connection headroom |
 | GET | `/api/admin/posts?status=&q=&page=&size=` | `{ items, total, page, size }` |
 | PATCH | `/api/admin/posts/:id` | `{ status: 'active'\|'hidden'\|'removed' }` |
 | GET | `/api/admin/charges?status=&page=&size=` | ledger of all new payments |
@@ -241,11 +277,12 @@ everything else → `Shell`.
 | `/explore` | ExplorePage | search, creators, top posts |
 | `/create` | CreatePostPage | upload/link, **price + fee preview**, 18+ flag |
 | `/post/:id` | PostDetailPage | paywall → PaySheet → unlocked media + comments |
+| `/creator/:id` | CreatorPage | follow, free/paid subscribe, creator posts |
 | `/live` | LivePage | 1v1 Match card, group calls,18+ conferences |
 | `/room/:slug` | RoomPage | paid entry + mesh group call UI |
 | `/match` | MatchPage | the **existing** `App.tsx` untouched, full-bleed |
 | `/wallet` | WalletPage | balance, earnings split, transactions, withdraw |
-| `/profile` | ProfilePage | own posts, creator stats, sign-in state |
+| `/profile` | ProfilePage | own posts, creator stats, subscription offer settings |
 | `/settings` | SettingsPage | account, adult acknowledgement, sign out |
 
 `Shell` owns the signed-in `account`, `config` and the nav (top bar + bottom

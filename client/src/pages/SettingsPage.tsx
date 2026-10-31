@@ -160,9 +160,7 @@ export default function SettingsPage({
             <span className="text-muted"> of every sale</span>
           </Row>
           <Row label="Payment method">
-            <span className="font-medium text-ink">
-              {commerce.payMode === 'stk' ? 'M-PESA prompt (STK push)' : 'Manual confirmation'}
-            </span>
+            <span className="font-medium text-ink">M-PESA prompt (STK push)</span>
           </Row>
           <Row label="Price range">
             <span className="font-medium tabular-nums text-ink">

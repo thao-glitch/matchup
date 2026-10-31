@@ -7,11 +7,9 @@ const http = require('http');
 
 const express = require('express');
 const cors = require('cors');
-const { Server } = require('socket.io');
 
 const { getIceConfig, describeIce, isLocalIp } = require('./src/iceConfig');
-const { Matchmaker } = require('./src/matchmaker');
-const { RoomHub } = require('./src/rooms');
+const realtime = require('./src/realtime');
 const telemetry = require('./src/telemetry');
 const store = require('./src/store');
 const accounts = require('./src/accounts');
@@ -22,6 +20,8 @@ const payments = require('./src/payments');
 const commerce = require('./src/commerce');
 const mpesa = require('./src/mpesa');
 const socialStore = require('./src/socialStore');
+const mediaStore = require('./src/mediaStore');
+const { handleUpload } = require('@vercel/blob/client');
 
 const PORT = Number(process.env.PORT) || 4000;
 const HOST = process.env.HOST || '0.0.0.0';
@@ -55,32 +55,36 @@ app.use((req, res, next) => {
 
 const server = http.createServer(app);
 
-const io = new Server(server, {
-  cors: { origin: ORIGINS.includes('*') ? true : ORIGINS, methods: ['GET', 'POST'] },
-  // WebSocket first (lowest signaling latency), polling as the fallback for
-  // networks that block WS upgrade.
-  transports: ['websocket', 'polling'],
-  pingInterval: 10_000,
-  pingTimeout: 20_000,
-  // SDP/ICE blobs are a few KB; anything near 1 MB is abuse.
-  maxHttpBufferSize: 1e6,
-  serveClient: false,
-  // Sticky sessions are required if you ever add a second instance — see the
-  // "Scaling" section of the README (Redis adapter + `@socket.io/sticky`).
-});
+/**
+ * The realtime layer used to be a socket hub held in this process; it is now
+ * HTTP + database (`src/realtime.js`). These facades keep the old call-shape
+ * (`stats()`, `withCounts(items)`, `close(slug)`) so the dashboard routes read
+ * exactly as before — every method returns a promise now.
+ */
+const presenceFacade = {
+  stats: () => realtime.presenceSnapshot(),
+  presence: () => realtime.presenceSnapshot(),
+  geoPresence: () => realtime.geoPresence(),
+};
 
-/** @type {Matchmaker | null} */
-let matchmaker = null;
-/** @type {RoomHub | null} — group calls + conferences (attached per socket). */
-let roomHub = null;
+const roomsFacade = {
+  stats: () => realtime.roomStats(),
+  withCounts: (items) => realtime.withCounts(items),
+  liveCount: async (slug) => (await realtime.withCounts([{ slug }]))[0]?.participants ?? 0,
+  close: (slug, opts) => realtime.closeRoom(slug, opts),
+};
 
 // ── HTTP routes ──────────────────────────────────────────────────────────────
 
-app.get('/health', (req, res) => {
+app.get('/health', async (req, res) => {
+  const [matchmaking, rooms] = await Promise.all([
+    presenceFacade.stats().catch(() => null),
+    roomsFacade.stats().catch(() => ({ rooms: 0, participants: 0 })),
+  ]);
   res.json({
     status: 'ok',
     uptimeSec: Math.round(process.uptime()),
-    matchmaking: matchmaker ? matchmaker.stats() : null,
+    matchmaking,
     store: typeof store.getMode === 'function' ? store.getMode() : 'memory',
     // Where accounts live: `maria` = the database on this PC, `memory` = dev.
     accounts: accounts.backend(),
@@ -90,9 +94,11 @@ app.get('/health', (req, res) => {
     // Which switch positions the lobby is currently rendering.
     features: settings.get().features,
     // Group calls / conferences that are live right now.
-    rooms: roomHub ? roomHub.stats() : { rooms: 0, participants: 0 },
+    rooms,
     // Operational glance: `turnConfigured: false` means strict-NAT users fail.
     ice: describeIce(),
+    // Where post media lives: `vercel-blob` keeps bytes out of MariaDB.
+    media: mediaStore.describe(),
   });
 });
 
@@ -119,7 +125,10 @@ app.get('/api/ice', async (req, res) => {
 });
 
 app.get('/api/stats', async (req, res) => {
-  const [db, matchmaking] = await Promise.all([store.stats(), Promise.resolve(matchmaker?.stats())]);
+  const [db, matchmaking] = await Promise.all([
+    store.stats(),
+    presenceFacade.stats().catch(() => null),
+  ]);
   // `calls` answers "is TURN earning its keep?" — success rate, relay share,
   // and how much traffic is still running without a relay fallback.
   res.json({ ...db, matchmaking, ice: describeIce(), calls: telemetry.snapshot() });
@@ -132,7 +141,7 @@ app.get('/api/stats', async (req, res) => {
  * never leaves this process (read from the settings cache, no DB round-trip).
  */
 app.get('/api/config', (req, res) => {
-  res.set('Cache-Control', 'no-cache').json(settings.publicConfig());
+  res.set('Cache-Control', 'no-cache').json({ ...settings.publicConfig(), media: mediaStore.describe() });
 });
 
 // ── Accounts (username + password) ──────────────────────────────────────────
@@ -175,17 +184,44 @@ const presenceLimiter = rateLimit({ windowMs: 60_000, max: 60 });
 /**
  * GET /api/presence → { online, looking, located, byCountry: [{code, online}] }
  *
- * The live per-country counts behind the "#europe" board. Aggregated in
- * memory from the profiles sockets submitted on `queue:join` — only sums ever
- * leave this process, so nothing individual (name, IP, session) can leak.
+ * The live per-country counts behind the "#europe" board. Aggregated from the
+ * realtime session table — only sums ever leave this endpoint, so nothing
+ * individual (name, IP, session) can leak.
  */
-app.get('/api/presence', presenceLimiter, (req, res) => {
+app.get('/api/presence', presenceLimiter, async (req, res) => {
   res.set('Cache-Control', 'no-store');
-  res.json(
-    matchmaker
-      ? matchmaker.geoPresence()
-      : { online: 0, looking: 0, located: 0, byCountry: [] },
-  );
+  try {
+    res.json(await realtime.geoPresence());
+  } catch (err) {
+    if (err.code === 'DB_UNAVAILABLE') {
+      return res.json({ online: 0, looking: 0, located: 0, byCountry: [] });
+    }
+    throw err;
+  }
+  return undefined;
+});
+
+// ── Realtime over HTTP (the platform cannot hold a socket open) ─────────────
+
+/**
+ * POST /api/rt/emit { event, payload } (header `x-matchup-sid`) — the whole
+ * client→server half of `protocol.js`: queue:join/leave, signal:data,
+ * call:event/end/report, room:create/enter/signal/leave/end. Every event it
+ * produces back to the client is written to the session's inbox row, which
+ * `GET /api/rt/poll` drains.
+ */
+app.post('/api/rt/emit', sessionLimiter, (req, res, next) => {
+  realtime.handleEmit(req, res).catch(next);
+});
+
+/**
+ * GET /api/rt/poll?since=N&wait=20 — long-poll. Holds the request open until
+ * an inbox row for this session exists (or `wait` elapses, capped at 25s so
+ * the function's maxDuration is never hit), then returns the events plus the
+ * live presence and, when queued, the current wait position.
+ */
+app.get('/api/rt/poll', sessionLimiter, (req, res, next) => {
+  realtime.handlePoll(req, res).catch(next);
 });
 
 const bearerOf = (req) => {
@@ -285,19 +321,38 @@ app.post('/api/passport/sync', sessionLimiter, async (req, res) => {
   }
 });
 
-// ── Paybill payments ─────────────────────────────────────────────────────────
+/**
+ * Reading the feed is the most-hit surface in the app — it gets its own,
+ * generous bucket so scrolling can never be throttled by someone else's
+ * page refreshes on the same IP.
+ *
+ * Declared here rather than down with the social routes: the payment poll
+ * below is a read too, and `const` is in the temporal dead zone until its
+ * declaration runs — a `node --check` cannot catch that, only a boot can.
+ */
+const readLimiter = rateLimit({ windowMs: 60_000, max: 240 });
+/** Publishing, commenting, uploading, paying: 30/min/IP is a real human. */
+const contentLimiter = rateLimit({ windowMs: 60_000, max: 30 });
 
-/** Creating an intent is rare (once per person); 30/min/IP is already generous. */
+// ── Premium (M-PESA STK push) ───────────────────────────────────────────────
+
+/** Firing a prompt is rare (once per person); 30/min/IP is already generous. */
 const paymentLimiter = rateLimit({ windowMs: 60_000, max: 30 });
 
-/** POST /api/payments/intent (Bearer) { providerRef? } → 201 { payment } */
+/**
+ * POST /api/payments/intent (Bearer) { phone } → 201 { payment }
+ *
+ * Opens the premium charge and fires the STK push — the phone prompts for the
+ * M-PESA PIN straight away, and the callback settles it. There is no
+ * reference number to copy and nothing for the owner to approve.
+ */
 app.post('/api/payments/intent', paymentLimiter, async (req, res) => {
   try {
     const user = await accounts.authenticate(bearerOf(req));
     if (!user) {
       return res
         .status(401)
-        .json({ error: { code: 'unauthorized', message: 'Please sign in to get a reference.' } });
+        .json({ error: { code: 'unauthorized', message: 'Please sign in to pay.' } });
     }
     res.status(201).json({ payment: await payments.createIntent(user, req.body || {}) });
   } catch (err) {
@@ -305,7 +360,25 @@ app.post('/api/payments/intent', paymentLimiter, async (req, res) => {
   }
 });
 
-/** GET /api/payments/mine (Bearer) → { payments, premiumUntil } — own rows only. */
+/**
+ * GET /api/payments/status/:id (Bearer) → { payment }
+ * The poll the panel runs while the phone shows the prompt.
+ */
+app.get('/api/payments/status/:id', readLimiter, async (req, res) => {
+  try {
+    const user = await accounts.authenticate(bearerOf(req));
+    if (!user) {
+      return res
+        .status(401)
+        .json({ error: { code: 'unauthorized', message: 'Please sign in again.' } });
+    }
+    res.set('Cache-Control', 'no-store').json(await payments.status(user, Number(req.params.id)));
+  } catch (err) {
+    sendAuthError(res, err);
+  }
+});
+
+/** GET /api/payments/mine (Bearer) → { premiumUntil, open, payments } — own rows only. */
 app.get('/api/payments/mine', sessionLimiter, async (req, res) => {
   try {
     const user = await accounts.authenticate(bearerOf(req));
@@ -316,15 +389,6 @@ app.get('/api/payments/mine', sessionLimiter, async (req, res) => {
 });
 
 // ── Social platform: posts, charges, wallet, rooms ──────────────────────────
-
-/**
- * Reading the feed is the most-hit surface in the app — it gets its own,
- * generous bucket so scrolling can never be throttled by someone else's
- * page refreshes on the same IP.
- */
-const readLimiter = rateLimit({ windowMs: 60_000, max: 240 });
-/** Publishing, commenting, uploading, paying: 30/min/IP is a real human. */
-const contentLimiter = rateLimit({ windowMs: 60_000, max: 30 });
 
 /** Bearer → account, or `null` (the feed is readable signed out). */
 const optionalUser = (req) => accounts.authenticate(bearerOf(req));
@@ -352,13 +416,14 @@ const intQuery = (value, fallback) => {
 app.get('/api/posts', readLimiter, async (req, res) => {
   try {
     const user = await optionalUser(req);
-    const { page, size, q, adult } = req.query || {};
+    const { page, size, q, adult, creatorId } = req.query || {};
     res.set('Cache-Control', 'no-store').json(
       await commerce.feed(user, {
         page: intQuery(page, 1),
         size: intQuery(size, 20),
         q: typeof q === 'string' ? q.slice(0, 80) : '',
         adult: adult === '1' || adult === 'true',
+        creatorId: intQuery(creatorId, null),
       }),
     );
   } catch (err) {
@@ -466,6 +531,93 @@ app.post('/api/posts/:id/comments', contentLimiter, async (req, res) => {
   return undefined;
 });
 
+// ── Creators: follows + subscriptions ────────────────────────────────────────
+
+/** GET /api/creators/me/subscription (Bearer) → the creator's own offer. */
+app.get('/api/creators/me/subscription', readLimiter, async (req, res) => {
+  try {
+    const user = await requireUser(req, res);
+    if (!user) return undefined;
+    res.set('Cache-Control', 'no-store').json(await commerce.myCreatorSubscription(user));
+  } catch (err) {
+    sendAuthError(res, err);
+  }
+  return undefined;
+});
+
+/** PUT /api/creators/me/subscription (Bearer) { enabled, price, periodDays, perk } */
+app.put('/api/creators/me/subscription', contentLimiter, async (req, res) => {
+  try {
+    const user = await requireUser(req, res);
+    if (!user) return undefined;
+    res.json(await commerce.updateCreatorSubscription(user, req.body || {}));
+  } catch (err) {
+    sendAuthError(res, err);
+  }
+  return undefined;
+});
+
+/** GET /api/creators/:id → profile, counts, offer and this viewer's state. */
+app.get('/api/creators/:id', readLimiter, async (req, res) => {
+  try {
+    const user = await optionalUser(req);
+    res.set('Cache-Control', 'no-store').json(await commerce.creator(user, Number(req.params.id)));
+  } catch (err) {
+    sendAuthError(res, err);
+  }
+});
+
+/** POST /api/creators/:id/follow (Bearer) → { following, followers } */
+app.post('/api/creators/:id/follow', contentLimiter, async (req, res) => {
+  try {
+    const user = await requireUser(req, res);
+    if (!user) return undefined;
+    res.json(await commerce.follow(user, Number(req.params.id), true));
+  } catch (err) {
+    sendAuthError(res, err);
+  }
+  return undefined;
+});
+
+/** DELETE /api/creators/:id/follow (Bearer) → { following, followers } */
+app.delete('/api/creators/:id/follow', contentLimiter, async (req, res) => {
+  try {
+    const user = await requireUser(req, res);
+    if (!user) return undefined;
+    res.json(await commerce.follow(user, Number(req.params.id), false));
+  } catch (err) {
+    sendAuthError(res, err);
+  }
+  return undefined;
+});
+
+/**
+ * POST /api/creators/:id/subscribe (Bearer) { phone? }
+ * Free offer → 201 { subscription }; priced offer → 201 { charge }.
+ */
+app.post('/api/creators/:id/subscribe', contentLimiter, async (req, res) => {
+  try {
+    const user = await requireUser(req, res);
+    if (!user) return undefined;
+    res.status(201).json(await commerce.subscribe(user, Number(req.params.id), req.body || {}));
+  } catch (err) {
+    sendAuthError(res, err);
+  }
+  return undefined;
+});
+
+/** DELETE /api/creators/:id/subscribe (Bearer) → stop renewing. */
+app.delete('/api/creators/:id/subscribe', contentLimiter, async (req, res) => {
+  try {
+    const user = await requireUser(req, res);
+    if (!user) return undefined;
+    res.json(await commerce.cancelSubscription(user, Number(req.params.id)));
+  } catch (err) {
+    sendAuthError(res, err);
+  }
+  return undefined;
+});
+
 /**
  * POST /api/media (Bearer) raw bytes → 201 { key }.
  * `express.raw` with a real body limit — this is the one route where the
@@ -490,6 +642,51 @@ app.post(
     return undefined;
   },
 );
+
+/**
+ * POST /api/media/direct (Bearer) → a short-lived Blob client token.
+ *
+ * Vercel Functions cap request bodies at a few megabytes, so a 32 MB video
+ * cannot be proxied through `/api/media`. The browser uploads straight to the
+ * private Blob store instead; this route only authenticates the creator and
+ * constrains the destination (allowed types, 32 MB ceiling, no overwrite).
+ * The resulting `pathname` is what `POST /api/posts` stores as `mediaKey`.
+ */
+app.post('/api/media/direct', contentLimiter, async (req, res) => {
+  try {
+    const user = await requireUser(req, res);
+    if (!user) return undefined;
+    if (!mediaStore.enabled()) {
+      return res.status(503).json({
+        error: { code: 'storage', message: 'Direct uploads are not configured on this server.' },
+      });
+    }
+    const result = await handleUpload({
+      request: req,
+      body: req.body,
+      onBeforeGenerateToken: async (pathname) => {
+        if (!commerce.isMediaKey(pathname)) {
+          throw new accounts.AuthError(
+            'media-type',
+            'Upload an image (JPEG, PNG, WebP, GIF) or a video (MP4, WebM).',
+            415,
+          );
+        }
+        return {
+          allowedContentTypes: commerce.mediaContentTypes(),
+          maximumSizeInBytes: 32 * 1024 * 1024,
+          addRandomSuffix: false,
+          allowOverwrite: false,
+          validUntil: Date.now() + 10 * 60 * 1000,
+        };
+      },
+    });
+    return res.json(result);
+  } catch (err) {
+    sendAuthError(res, err);
+  }
+  return undefined;
+});
 
 // ── Charges (M-PESA STK push) ────────────────────────────────────────────────
 
@@ -600,9 +797,9 @@ app.get('/api/rooms', readLimiter, async (req, res) => {
       kind: typeof kind === 'string' ? kind : '',
       adult: adult === '1' || adult === 'true',
     });
-    // Live head-count comes from the socket hub, not the database.
+    // Live head-count comes from the realtime layer, not the database.
     res.set('Cache-Control', 'no-store').json({
-      items: roomHub ? roomHub.withCounts(result.items) : result.items.map((r) => ({ ...r, participants: 0 })),
+      items: await realtime.withCounts(result.items),
     });
   } catch (err) {
     sendAuthError(res, err);
@@ -616,9 +813,10 @@ app.get('/api/rooms/:slug', readLimiter, async (req, res) => {
     const data = await commerce.roomInfo(user, req.params.slug);
     res.set('Cache-Control', 'no-store').json({
       ...data,
-      room: roomHub
-        ? { ...data.room, participants: roomHub.liveCount(data.room.slug) }
-        : { ...data.room, participants: 0 },
+      room: {
+        ...data.room,
+        participants: await roomsFacade.liveCount(data.room.slug).catch(() => 0),
+      },
     });
   } catch (err) {
     sendAuthError(res, err);
@@ -682,10 +880,14 @@ app.get('/api/admin/me', adminLimiter, adminRoute(async (identity) => ({ admin: 
 /** GET /api/admin/overview → accounts, live queue, calls, ledger, settings. */
 app.get('/api/admin/overview', adminLimiter, adminRoute(async (identity, req, res) => {
   res.set('Cache-Control', 'no-store');
-  return res.json(await admin.overview(matchmaker, roomHub));
+  return res.json(await admin.overview(presenceFacade, roomsFacade));
 }));
 
 /** GET /api/admin/users?q=&filter=&page=&size= → { items, total, page, size } */
+app.get('/api/admin/db', adminLimiter, adminRoute(async () => ({
+  database: await admin.databaseStats(),
+})));
+
 app.get('/api/admin/users', adminLimiter, adminRoute(async (identity, req, res) => {
   const { q, filter, page, size } = req.query || {};
   res.set('Cache-Control', 'no-store');
@@ -705,18 +907,19 @@ app.delete('/api/admin/users/:id', adminLimiter, adminRoute(async (identity, req
   res.status(204).end();
 }));
 
-/** GET /api/admin/payments?status=&page=&size= → { items, total, page, size } */
-app.get('/api/admin/payments', adminLimiter, adminRoute(async (identity, req, res) => {
-  const { status, page, size } = req.query || {};
+/**
+ * POST /api/admin/mpesa/test { phone? } → { checks }
+ *
+ * The one place the owner finds out whether payments can actually be taken.
+ * It reports each requirement separately — credentials, callback, shortcode,
+ * passkey — because "M-PESA is not working" is four different problems with
+ * four different fixes. With a `phone` it also fires a real STK push at that
+ * number, which is the only honest end-to-end proof: Safaricom validates the
+ * shortcode and passkey when it builds the prompt.
+ */
+app.post('/api/admin/mpesa/test', adminLimiter, adminRoute(async (identity, req, res) => {
   res.set('Cache-Control', 'no-store');
-  const result = await admin.listPayments({ status, page: Number(page), size: Number(size) });
-  res.json({ ...result, page: Math.max(1, Number(page) || 1), size: Math.min(100, Number(size) || 25) });
-}));
-
-/** PATCH /api/admin/payments/:id { status, note? } → { payment } — approval grants premium. */
-app.patch('/api/admin/payments/:id', adminLimiter, adminRoute(async (identity, req, res) => {
-  const payment = await admin.reviewPayment(identity, Number(req.params.id), req.body || {});
-  res.json({ payment });
+  res.json({ checks: await admin.testMpesa(identity, req.body || {}) });
 }));
 
 /** GET /api/admin/settings → the full payment + feature configuration. */
@@ -786,7 +989,7 @@ app.get('/api/admin/rooms', adminLimiter, adminRoute(async (identity, req, res) 
   });
   res.json({
     ...result,
-    items: roomHub ? roomHub.withCounts(result.items) : result.items.map((r) => ({ ...r, participants: 0 })),
+    items: await realtime.withCounts(result.items),
     page: Math.max(1, Number(page) || 1),
     size: Math.min(100, Number(size) || 25),
   });
@@ -794,7 +997,7 @@ app.get('/api/admin/rooms', adminLimiter, adminRoute(async (identity, req, res) 
 
 /** PATCH /api/admin/rooms/:id { status: 'live'|'ended' } → closes it live. */
 app.patch('/api/admin/rooms/:id', adminLimiter, adminRoute(async (identity, req, res) => {
-  res.json(await admin.updateRoom(identity, Number(req.params.id), req.body || {}, roomHub));
+  res.json(await admin.updateRoom(identity, Number(req.params.id), req.body || {}, roomsFacade));
 }));
 
 /** GET /api/admin/earnings?days= → gross, the house cut, wallets, payouts. */
@@ -850,68 +1053,62 @@ if (servesClient) {
   });
 }
 
-// ── Signaling ────────────────────────────────────────────────────────────────
-
-io.on('connection', (socket) => {
-  matchmaker?.attach(socket);
-  // Group calls / conferences run alongside the matchmaker on the same
-  // socket — a user can hold a room open and still queue for1v1.
-  roomHub?.attach(socket);
-
-  // Fresh sockets get an immediate presence snapshot so the lobby counter is
-  // never `0` while the periodic broadcast is still pending.
-  if (matchmaker) socket.emit('presence', matchmaker.presence());
-
-  socket.on('error', (err) => {
-    console.error(`[socket] ${socket.id} error:`, err.message);
-  });
-});
-
 // ── Boot ─────────────────────────────────────────────────────────────────────
 
+/**
+ * Bring the process to "ready to serve": database, schema, module wiring.
+ * Called once on local boot and once per serverless instance (see
+ * `api/index.js`, which wraps this same Express app for the platform).
+ */
+let booted = null;
+function boot() {
+  booted ||= (async () => {
+    await store.initStore();
+    const mode = store.getMode();
+    // Accounts follow the store: MariaDB when it is up, in-memory otherwise.
+    accounts.init(mode);
+    passport.init(mode);
+    // Payments, settings and the dashboard all need a real database — they
+    // degrade to clear 503s instead of pretending to work.
+    payments.init(mode);
+    admin.init(mode);
+    // The social platform (posts, charges, wallets, rooms) follows the ledger:
+    // it needs the same database and degrades to clear 503s without it.
+    commerce.init(mode);
+
+    await settings.load();
+    await admin.bootstrap();
+    await admin.resetFromEnv();
+    await accounts.refreshBanIps();
+
+    if (mode !== 'maria') {
+      console.warn(
+        '[admin] no database → /admin, payments and settings are disabled (MARIADB_* not configured)',
+      );
+    }
+    return mode;
+  })().catch((err) => {
+    booted = null; // a failed boot must be retryable, not cached forever
+    throw err;
+  });
+  return booted;
+}
+
+/** Local entrypoint: boot, then hold the port. Serverless skips the listen. */
 async function main() {
-  await store.initStore();
-  const mode = store.getMode();
-  // Accounts follow the store: MariaDB when it is up, in-memory otherwise.
-  accounts.init(mode);
-  passport.init(mode);
-  // Payments, settings and the dashboard all need a real database — they
-  // degrade to clear 503s instead of pretending to work.
-  payments.init(mode);
-  admin.init(mode);
-  // The social platform (posts, charges, wallets, rooms) follows the ledger:
-  // it needs the same database and degrades to clear 503s without it.
-  commerce.init(mode);
-
-  await settings.load();
-  await admin.bootstrap();
-  await accounts.refreshBanIps();
-
-  matchmaker = new Matchmaker(io, store);
-  matchmaker.startTicker(Number(process.env.PRESENCE_INTERVAL_MS) || 5000);
-  roomHub = new RoomHub(io);
-
+  await boot();
   await new Promise((resolve, reject) => {
     server.once('error', reject);
     server.listen(PORT, HOST, resolve);
   });
-
   console.info(`[http] listening on http://${HOST}:${PORT} (${servesClient ? 'api + spa' : 'api'})`);
   console.info(`[http] CORS origin(s): ${ORIGINS.join(', ')}`);
-  if (mode !== 'maria') {
-    console.warn(
-      '[admin] no database → /admin, payments and settings are disabled (MARIADB_* not configured)',
-    );
-  }
 }
 
 function shutdown(signal) {
   console.info(`[server] ${signal} received, shutting down…`);
-  matchmaker?.stopTicker();
-  io.close(() => {
-    server.close(() => process.exit(0));
-  });
-  // Never hang a deploy: force-exit after 8s if sockets refuse to drain.
+  server.close(() => process.exit(0));
+  // Never hang a deploy: force-exit after 8s if requests refuse to drain.
   setTimeout(() => process.exit(0), 8000).unref();
 }
 
@@ -924,7 +1121,13 @@ process.on('uncaughtException', (err) => {
   console.error('[server] uncaught exception:', err);
 });
 
-main().catch((err) => {
-  console.error('[server] failed to start:', err);
-  process.exit(1);
-});
+// Only take the port when run directly (`node server.js`). The serverless
+// wrapper imports the same file and must not start listening.
+if (require.main === module) {
+  main().catch((err) => {
+    console.error('[server] failed to start:', err);
+    process.exit(1);
+  });
+}
+
+module.exports = { app, boot, server };

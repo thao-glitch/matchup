@@ -41,9 +41,6 @@ export interface DayTotal {
 
 export interface PaymentSettings {
   enabled: boolean;
-  bank: string;
-  paybill: string;
-  accountFormat: string;
   amount: number;
   currency: string;
   productName: string;
@@ -89,8 +86,66 @@ export interface CallStats {
   recent: CallReport[];
 }
 
+/** One calendar day of the settled-charge series behind the charts. */
+export interface ChargeDay {
+  /** `YYYY-MM-DD` as the database produced it (local server day). */
+  day: string;
+  count: number;
+  gross: number;
+  commission: number;
+}
+
+/**
+ * The live money: every payment on the platform is a charge, so this — not
+ * the legacy `payments` ledger — is what the dashboard's revenue tiles read.
+ */
+export interface CommerceSummary {
+  charges: {
+    count: number;
+    gross: number;
+    commission: number;
+    net: number;
+    pending: number;
+    paid: number;
+    failed: number;
+    expired: number;
+    byDay: ChargeDay[];
+  };
+  wallets: {
+    held: number;
+    earned: number;
+    paidOut: number;
+    wallets: number;
+    pendingPayouts: number;
+    pendingAmount: number;
+  };
+  rooms: { live: number; total: number; [key: string]: number };
+}
+
+export interface DatabaseTable {
+  name: string;
+  rows: number;
+  dataBytes: number;
+  indexBytes: number;
+  totalBytes: number;
+}
+
+export interface DatabaseData {
+  version: string;
+  database: string;
+  totalBytes: number;
+  dataBytes: number;
+  indexBytes: number;
+  tables: DatabaseTable[];
+  connections: { current: number; running: number; max: number };
+  maxAllowedPacket: number;
+  innodbPageSize: number;
+  uptimeSec: number;
+}
+
 export interface OverviewData {
   accounts: { total: number; new7d: number; active7d: number; banned: number; premium: number };
+  /** The legacy paybill ledger — read-only, no new rows are ever written. */
   payments: {
     pending: number;
     approved: number;
@@ -100,7 +155,10 @@ export interface OverviewData {
   };
   live: { online: number; looking: number };
   calls: CallStats;
+  commerce: CommerceSummary;
   store: { mode: string };
+  database: DatabaseData | null;
+  media: { backend: string; objectStorage: boolean; private: boolean; directUpload: boolean };
   config: { features: FeatureFlags; payment: PaymentSettings };
   server: { uptimeSec: number; node: string; now: string };
 }
@@ -130,27 +188,6 @@ export interface Paged<T> {
   size: number;
 }
 
-export interface PaymentRow {
-  id: number;
-  accountId: number;
-  username: string;
-  amount: number;
-  currency: string;
-  method: string;
-  paybill: string;
-  /** What the payer typed as the account number — the matching key. */
-  accountNo: string;
-  providerRef: string | null;
-  status: 'pending' | 'approved' | 'rejected';
-  note: string | null;
-  premiumDays: number;
-  reviewedBy: number | null;
-  reviewedAt: string | null;
-  createdAt: string;
-  /** False when the account this payment points at was deleted meanwhile. */
-  accountExists: boolean;
-}
-
 // ── Social platform (posts, charges, rooms, wallets) ─────────────────────────
 
 /** A creator's post as moderation sees it — no media URLs, just the record. */
@@ -176,7 +213,7 @@ export interface AdminPost {
 /** One paid-content transaction: gross, the house cut, and the creator's net. */
 export interface AdminCharge {
   id: number;
-  purpose: 'post' | 'room';
+  purpose: 'post' | 'room' | 'premium' | 'sub';
   refId: number;
   buyerId: number;
   buyerUsername: string;
@@ -266,16 +303,27 @@ export interface CommerceSettings {
  *  the stored one, so an untouched form round-trips safely. */
 export interface MpesaSettings {
   enabled: boolean;
-  mode: 'stk' | 'manual';
   consumerKey: string;
   consumerSecret: string;
   shortcode: string;
+  /** `'till'` bills a Buy Goods till (`CustomerBuyGoodsOnline`); `'paybill'`
+   *  is the default rail and what a Lipa na M-PESA Paybill expects. */
+  shortcodeType: 'paybill' | 'till';
   passkey: string;
   baseUrl: string;
   callbackUrl: string;
-  paybill: string;
-  accountFormat: string;
   description: string;
+}
+
+/**
+ * One line of `POST /api/admin/mpesa/test`. `ok` is tri-state: `true` passed,
+ * `false` is broken, `null` means an earlier requirement is still missing so
+ * this one could not be judged.
+ */
+export interface MpesaCheck {
+  name: string;
+  ok: boolean | null;
+  message: string;
 }
 
 export interface SettingsBundle {
@@ -477,6 +525,19 @@ export function formatDurationMs(ms: number): string {
 }
 
 /** Server uptime in the same spirit: `4m`, `3h 12m`, `2d 4h`. */
+export function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return '—';
+  if (bytes < 1024) return `${Math.round(bytes)} B`;
+  const units = ['KB', 'MB', 'GB', 'TB', 'PB'];
+  let value = bytes / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value >= 10 ? value.toFixed(0) : value.toFixed(1)} ${units[unit]}`;
+}
+
 export function formatUptime(seconds: number): string {
   if (!Number.isFinite(seconds) || seconds < 0) return '—';
   if (seconds < 60) return `${Math.round(seconds)}s`;
@@ -497,4 +558,16 @@ export function flagEmoji(code: string | null | undefined): string {
   const clean = code.trim().toUpperCase();
   if (!/^[A-Z]{2}$/.test(clean)) return '';
   return String.fromCodePoint(...Array.from(clean, (ch) => 0x1f1e6 + ch.charCodeAt(0) - 65));
+}
+
+/**
+ * Check the Daraja setup, optionally firing a real KES 1 prompt at `phone`.
+ * The only way to tell "credentials are wrong" from "shortcode is missing"
+ * without reading a stack trace.
+ */
+export async function testMpesa(phone?: string): Promise<{ ok: boolean; checks: MpesaCheck[] }> {
+  return request<{ ok: boolean; checks: MpesaCheck[] }>('/mpesa/test', {
+    method: 'POST',
+    body: JSON.stringify(phone ? { phone } : {}),
+  });
 }

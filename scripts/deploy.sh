@@ -43,7 +43,7 @@ command -v docker >/dev/null 2>&1 || { echo "✗ docker is not installed."; exit
 
 # ── 1. Build ─────────────────────────────────────────────────────────────────
 echo "── Building the standalone image ($LOCAL_TAG) — first run takes ~2 min"
-"$ENGINE" build --format docker -t "$LOCAL_TAG" .
+"$ENGINE" build -t "$LOCAL_TAG" .
 echo "✓ built $LOCAL_TAG"
 
 # ── 2. Push ──────────────────────────────────────────────────────────────────

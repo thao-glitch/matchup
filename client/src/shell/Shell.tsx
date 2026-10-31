@@ -45,6 +45,7 @@ import LivePage from '../pages/LivePage';
 import RoomPage from '../pages/RoomPage';
 import WalletPage from '../pages/WalletPage';
 import ProfilePage from '../pages/ProfilePage';
+import CreatorPage from '../pages/CreatorPage';
 import SettingsPage from '../pages/SettingsPage';
 import MatchPage from '../pages/MatchPage';
 
@@ -152,6 +153,8 @@ export default function Shell() {
 
   if ((params = matchRoute(path, '/post/:id'))) {
     content = <PostDetailPage {...withParams(params)} />;
+  } else if ((params = matchRoute(path, '/creator/:id'))) {
+    content = <CreatorPage {...withParams(params)} />;
   } else if ((params = matchRoute(path, '/room/:slug'))) {
     content = <RoomPage {...withParams(params)} />;
     fullBleed = true;

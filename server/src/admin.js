@@ -23,6 +23,7 @@ const accounts = require('./accounts');
 const mariaStore = require('./mariaStore');
 const socialStore = require('./socialStore');
 const settings = require('./settings');
+const mediaStore = require('./mediaStore');
 const telemetry = require('./telemetry');
 const commerce = require('./commerce');
 const mpesa = require('./mpesa');
@@ -92,6 +93,64 @@ async function bootstrap(env = process.env) {
     return admin;
   } catch (err) {
     console.error('[admin] bootstrap failed:', err.message);
+    return null;
+  }
+}
+
+/**
+ * One-time credential rotation for a lost admin password.
+ *
+ * Hosted environments store `ADMIN_PASSWORD` and the database password as
+ * write-only secrets, so neither can be read back from a laptop. When
+ * `ADMIN_RESET_PASSWORD` is present this runs on boot, rewrites the hash for
+ * `ADMIN_RESET_USERNAME` (default: `ADMIN_USERNAME`, else `owner`), invalidates
+ * that admin's sessions and writes an audit row. Remove the variable and
+ * redeploy once the new password has been verified.
+ *
+ * Safe to leave configured: every boot simply sets the same hash again.
+ */
+async function resetFromEnv(env = process.env) {
+  if (backend !== 'maria') return null;
+  const password = String(env.ADMIN_RESET_PASSWORD || '');
+  if (!password) return null;
+  if (password.length < MIN_PASSWORD) {
+    console.warn(
+      `[admin] ADMIN_RESET_PASSWORD is shorter than ${MIN_PASSWORD} characters — reset skipped`,
+    );
+    return null;
+  }
+  const username = String(env.ADMIN_RESET_USERNAME || env.ADMIN_USERNAME || 'owner')
+    .trim()
+    .slice(0, 24);
+  if (username.length < 2) return null;
+
+  try {
+    let admin = await mariaStore.findAdmin(username);
+    if (!admin) {
+      admin = await mariaStore.createAdmin({
+        username,
+        passwordHash: await hashPassword(password),
+        role: 'owner',
+      });
+      console.info(`[admin] created "${admin.username}" from ADMIN_RESET_PASSWORD`);
+    } else {
+      await mariaStore.query('UPDATE admins SET password_hash = ? WHERE id = ?', [
+        await hashPassword(password),
+        admin.id,
+      ]);
+      await mariaStore.query('DELETE FROM admin_sessions WHERE admin_id = ?', [admin.id]);
+      console.info(`[admin] password reset for "${admin.username}" from ADMIN_RESET_PASSWORD`);
+    }
+    mariaStore.insertAudit({
+      adminId: admin.id,
+      adminName: admin.username,
+      action: 'password.reset',
+      target: admin.username,
+      detail: { via: 'environment' },
+    });
+    return admin;
+  } catch (err) {
+    console.error('[admin] password reset failed:', err.message);
     return null;
   }
 }
@@ -173,27 +232,34 @@ function audit(admin, action, target = '', detail = null) {
  */
 async function overview(matchmaker, roomHub) {
   requireDb();
-  const [accounts_, payments, config, charges, wallets, rooms_] = await Promise.all([
-    mariaStore.accountStats(),
-    mariaStore.paymentSummary(),
-    Promise.resolve(settings.get()),
-    socialStore.chargeSummary({ days: 14 }).catch(() => null),
-    socialStore.walletStats().catch(() => null),
-    socialStore.roomStats().catch(() => null),
-  ]);
+  const [accounts_, payments, config, charges, wallets, rooms_, live, liveRooms, database] =
+    await Promise.all([
+      mariaStore.accountStats(),
+      mariaStore.paymentSummary(),
+      Promise.resolve(settings.get()),
+      socialStore.chargeSummary({ days: 14 }).catch(() => null),
+      socialStore.walletStats().catch(() => null),
+      socialStore.roomStats().catch(() => null),
+      // The realtime facade answers over HTTP now — every method is async.
+      (matchmaker ? matchmaker.presence() : Promise.resolve(null)).catch(() => null),
+      (roomHub ? roomHub.stats() : Promise.resolve(null)).catch(() => null),
+      mariaStore.dbStats().catch(() => null),
+    ]);
 
   return {
     accounts: accounts_,
     payments,
-    live: matchmaker ? matchmaker.presence() : { online: 0, looking: 0 },
+    live: live || { online: 0, looking: 0 },
     calls: telemetry.snapshot(),
     // The new money: what came in, what the house kept, what is held in wallets.
     commerce: {
       charges: charges ?? { count: 0, gross: 0, commission: 0, net: 0, pending: 0, paid: 0, byDay: [] },
       wallets: wallets ?? { held: 0, earned: 0, paidOut: 0, wallets: 0, pendingPayouts: 0, pendingAmount: 0 },
-      rooms: { ...(rooms_ ?? { live: 0, total: 0 }), ...(roomHub ? roomHub.stats() : {}) },
+      rooms: { ...(rooms_ ?? { live: 0, total: 0 }), ...(liveRooms || { rooms: 0, participants: 0 }) },
     },
     store: { mode: backend },
+    database,
+    media: mediaStore.describe(),
     config: {
       features: { ...config.features },
       payment: { ...config.payment },
@@ -205,6 +271,12 @@ async function overview(matchmaker, roomHub) {
       now: new Date().toISOString(),
     },
   };
+}
+
+/** Database footprint + connection headroom for the overview card. */
+async function databaseStats() {
+  requireDb();
+  return mariaStore.dbStats();
 }
 
 // ── Users ────────────────────────────────────────────────────────────────────
@@ -267,39 +339,24 @@ async function revokeSessions(accountId) {
   }
 }
 
-// ── Payments ─────────────────────────────────────────────────────────────────
-
-async function listPayments(query) {
-  requireDb();
-  return mariaStore.listPayments(query);
-}
+// ── M-PESA ───────────────────────────────────────────────────────────────────
 
 /**
- * Approve / reject one ledger row. Approving is the moment premium is
- * granted (see `mariaStore.reviewPayment`) — this is the manual step that
- * replaces the callback a paybill does not send.
+ * Check the Daraja setup end to end and report what is outstanding.
+ *
+ * This replaced the old payments approval screen: there is nothing left for
+ * the owner to approve, because the callback settles every charge. What the
+ * owner does need is a way to tell "my credentials are wrong" from "my
+ * shortcode is missing" without reading a stack trace.
  */
-async function reviewPayment(admin, id, patch = {}) {
-  requireDb();
-  const status = String(patch.status || '');
-  if (!['pending', 'approved', 'rejected'].includes(status)) {
-    throw new AuthError('status', 'Status must be pending, approved or rejected.', 400);
-  }
-  const before = await mariaStore.getPayment(id);
-  if (!before) throw new AuthError('not-found', 'That payment no longer exists.', 404);
-
-  const payment = await mariaStore.reviewPayment(id, {
-    status,
-    note: patch.note ?? before.note,
-    adminId: admin.id,
+async function testMpesa(admin, body = {}) {
+  const phone = body?.phone ? String(body.phone).trim() : '';
+  const result = await mpesa.testConnection({ phone });
+  audit(admin, 'mpesa.test', phone || 'config only', {
+    ok: result.ok,
+    failed: result.checks.filter((check) => check.ok === false).map((check) => check.name),
   });
-  audit(admin, `payment.${status}`, `#${payment.id} ${payment.username}`, {
-    amount: payment.amount,
-    currency: payment.currency,
-    accountNo: payment.accountNo,
-    providerRef: payment.providerRef,
-  });
-  return payment;
+  return result;
 }
 
 // ── Settings ─────────────────────────────────────────────────────────────────
@@ -388,9 +445,10 @@ async function listCharges(query) {
 }
 
 /**
- * Manual settlement — the `manual` payment mode's "the money is on the
- * statement, open the gate" button. `settle()` is idempotent, so a click that
- * races the real M-PESA callback cannot pay a creator twice.
+ * Manual settlement — the fallback for a charge whose callback never landed
+ * (a dead tunnel, a dropped poll). `settle()` is idempotent, so a click that
+ * races the real M-PESA callback cannot pay a creator — or extend a premium —
+ * twice. Premium charges settle onto the buyer's account here too.
  */
 async function reviewCharge(admin, id, patch = {}) {
   requireDb();
@@ -509,16 +567,17 @@ module.exports = {
   AuthError,
   init,
   bootstrap,
+  resetFromEnv,
   login,
   authenticate,
   logout,
   audit,
   overview,
+  databaseStats,
   listUsers,
   updateUser,
   deleteUser,
-  listPayments,
-  reviewPayment,
+  testMpesa,
   getSettings,
   saveSettings,
   listAudit,

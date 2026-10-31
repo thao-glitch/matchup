@@ -1,26 +1,34 @@
 /**
- * Paybill payment panel — the lobby's "support the app / go premium" card.
+ * Premium panel — the lobby's "support the app / go premium" card.
  *
- * It does exactly three things, and deliberately nothing more:
+ * It does exactly four things, and deliberately nothing more:
  *
- *   1. shows the configured DTB paybill + the person's unique Account Number
- *      (the value that ties an incoming bank payment to their account),
- *   2. lets them copy the transaction code they saw after paying, and
- *   3. keeps their ledger status on screen — pending / approved / rejected.
+ *   1. shows the price and how much premium is already running,
+ *   2. takes an M-PESA number and fires an STK push,
+ *   3. waits on the phone's PIN prompt, and
+ *   4. flips to "active" the moment the callback settles the charge.
  *
- * There is no card form, no redirect and no bank API here on purpose: a plain
- * paybill has no callback, so a human confirms payment in `/admin`. The panel
- * only has to make that manual match trivial — same Account Number, on both
- * sides.
+ * There is no account number to copy, no transaction code to type in and no
+ * "I have paid" button: Daraja answers for itself the moment the PIN lands,
+ * so the panel's only job after that point is to watch `charge.status`.
+ *
+ * A reload mid-prompt is safe — the server still holds the open charge, so
+ * this panel picks the wait back up instead of prompting the phone twice.
  *
  * Everything is read from the public `/api/config` block the owner edits in
- * the dashboard, so changing the paybill or the price takes effect for every
+ * the dashboard, so changing the price or the period takes effect for every
  * visitor without a redeploy.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { AccountUser, PaymentIntent } from '../types';
+import type { AccountUser, PremiumPayment } from '../types';
 import type { PublicConfig } from '../lib/config';
-import { PaymentError, createPaymentIntent, fetchMyPayments } from '../lib/payments';
+import {
+  PaymentError,
+  createPaymentIntent,
+  fetchMyPayments,
+  waitForPayment,
+} from '../lib/payments';
+import { formatKes, isValidPhone, lastPhone, rememberPhone } from '../lib/social';
 import { SpinnerIcon } from './icons';
 
 interface Props {
@@ -46,107 +54,131 @@ function premiumActive(iso: string | null | undefined): boolean {
   return Number.isFinite(until) && until > Date.now();
 }
 
+type Phase = 'idle' | 'form' | 'sending' | 'waiting' | 'error';
+
 export default function PaymentPanel({ account, config, onPremiumChange }: Props) {
   const [open, setOpen] = useState(false);
-  const [intent, setIntent] = useState<PaymentIntent | null>(null);
+  const [phase, setPhase] = useState<Phase>('idle');
+  const [phone, setPhone] = useState(() => lastPhone());
+  const [charge, setCharge] = useState<PremiumPayment | null>(null);
   const [premiumUntil, setPremiumUntil] = useState<string | null>(account?.premiumUntil ?? null);
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [flash, setFlash] = useState<string | null>(null);
-  const [refInput, setRefInput] = useState('');
-  const [copied, setCopied] = useState(false);
-  const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Guards against setting state after the panel has been dismissed. */
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
 
-  const { payment } = config;
+  const { payment, commerce } = config;
+  const active = premiumActive(premiumUntil);
+  /** Double-tapping Pay must not open two STK prompts. */
+  const busy = phase === 'sending' || phase === 'waiting';
 
-  /** Pull the existing ledger so a returning payer sees their status. */
+  const applyPremium = useCallback(
+    (iso: string | null) => {
+      setPremiumUntil(iso);
+      onPremiumChange?.(iso);
+    },
+    [onPremiumChange],
+  );
+
+  /**
+   * Pull the buyer's own state so a returning payer sees what is already
+   * running — and, if their phone is still showing a prompt from before the
+   * reload, pick that wait back up rather than prompting them twice.
+   */
   const refresh = useCallback(async () => {
-    if (!account) {
-      setIntent(null);
-      return;
-    }
+    if (!account) return;
     try {
       const data = await fetchMyPayments();
-      setPremiumUntil(data.premiumUntil);
-      onPremiumChange?.(data.premiumUntil);
-      // The newest row is the one that matters — the user only ever has one
-      // open reference, and history lives on the server until they need it.
-      setIntent(data.payments[0] ?? null);
-      if (data.payments[0]) setRefInput(data.payments[0].providerRef ?? '');
+      if (!alive.current) return;
+      applyPremium(data.premiumUntil);
+      if (data.open) {
+        setCharge(data.open);
+        setPhase('waiting');
+        void watch(data.open.id);
+      }
     } catch {
-      /* silent: the panel still works, it just starts from "no reference" */
+      /* silent: the panel still works, it just starts from "not paid yet" */
     }
-  }, [account, onPremiumChange]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [account, applyPremium]);
 
   useEffect(() => {
     void refresh();
-    return () => {
-      if (copyTimer.current) clearTimeout(copyTimer.current);
-    };
   }, [refresh]);
 
   if (!payment.enabled) return null;
 
-  const active = premiumActive(premiumUntil);
+  /** Poll until the charge resolves, then hand the entitlement over. */
+  async function watch(id: number) {
+    try {
+      const settled = await waitForPayment(id, {
+        onTick: (next) => {
+          if (alive.current) setCharge(next);
+        },
+      });
+      if (!alive.current) return;
+      if (settled.status === 'paid') {
+        // The charge carries the entitlement the callback just granted.
+        applyPremium(settled.premiumUntil ?? premiumUntil);
+        setPhase('idle');
+        setCharge(settled);
+      } else {
+        setError(settled.error ?? 'The payment did not go through — try again.');
+        setPhase('error');
+      }
+    } catch (err) {
+      if (!alive.current) return;
+      setError(err instanceof Error ? err.message : 'Lost contact while waiting for the payment.');
+      setPhase('error');
+    }
+  }
 
-  /** Ask for (or re-open) the reference — the same one every time. */
-  async function ensureIntent() {
-    setBusy(true);
+  /** Fire the prompt. The phone asks for its PIN the moment this returns. */
+  async function pay() {
+    if (busy) return;
+    if (!account) return;
+    if (!isValidPhone(phone)) {
+      setError('Enter a valid Safaricom number, e.g. 0712 345 678.');
+      setPhase('form');
+      return;
+    }
+    setPhase('sending');
     setError(null);
     try {
-      const created = await createPaymentIntent(refInput.trim() || undefined);
-      setIntent(created);
+      rememberPhone(phone);
+      const opened = await createPaymentIntent(phone);
+      if (!alive.current) return;
+      setCharge(opened);
+      setPhase('waiting');
+      await watch(opened.id);
     } catch (err) {
-      setError(err instanceof PaymentError ? err.message : 'Something went wrong — try again.');
-    } finally {
-      setBusy(false);
+      if (!alive.current) return;
+      // Already premium (another tab, a previous session) — that is a success,
+      // not a failure: the entitlement they came for is already running.
+      if (err instanceof PaymentError && err.code === 'already-owned') {
+        setError(null);
+        setPhase('idle');
+        return;
+      }
+      setError(err instanceof PaymentError ? err.message : 'The payment could not be started.');
+      setPhase('error');
     }
   }
 
-  /** "I have paid" — re-attaches the transaction code to the same intent. */
-  async function confirmPaid() {
-    setBusy(true);
-    setError(null);
-    setFlash(null);
-    try {
-      const created = await createPaymentIntent(refInput.trim() || undefined);
-      setIntent(created);
-      setFlash(
-        'Thanks — your payment is in the queue. Access is released as soon as the money shows on the statement.',
-      );
-    } catch (err) {
-      setError(err instanceof PaymentError ? err.message : 'Something went wrong — try again.');
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function copyAccountNo() {
-    if (!intent) return;
-    try {
-      await navigator.clipboard.writeText(intent.accountNo);
-      setCopied(true);
-      if (copyTimer.current) clearTimeout(copyTimer.current);
-      copyTimer.current = setTimeout(() => setCopied(false), 2000);
-    } catch {
-      /* clipboard blocked — the number is on screen anyway */
-    }
-  }
-
-  const statusPill =
-    intent?.status === 'approved' ? (
-      <span className="inline-flex items-center gap-1 rounded-full bg-ok/15 px-2.5 py-1 text-xs font-semibold text-ok">
-        ✓ Approved
-      </span>
-    ) : intent?.status === 'rejected' ? (
-      <span className="inline-flex items-center gap-1 rounded-full bg-danger/15 px-2.5 py-1 text-xs font-semibold text-danger">
-        ✕ Not matched
-      </span>
-    ) : intent ? (
-      <span className="inline-flex items-center gap-1 rounded-full bg-warn/15 px-2.5 py-1 text-xs font-semibold text-warn">
-        ◔ Waiting for confirmation
-      </span>
-    ) : null;
+  const statusPill = active ? (
+    <span className="inline-flex items-center gap-1 rounded-full bg-ok/15 px-2.5 py-1 text-xs font-semibold text-ok">
+      ✓ Premium active
+    </span>
+  ) : charge?.status === 'pending' ? (
+    <span className="inline-flex items-center gap-1 rounded-full bg-warn/15 px-2.5 py-1 text-xs font-semibold text-warn">
+      ◔ Waiting for your PIN
+    </span>
+  ) : null;
 
   return (
     <div className="mt-5 rounded-xl border border-white/10 bg-surface-3/60 p-4 text-left">
@@ -158,7 +190,7 @@ export default function PaymentPanel({ account, config, onPremiumChange }: Props
           <p className="text-xs text-muted">
             {active
               ? `Premium until ${formatDate(premiumUntil)} — no ads, and you keep the app online.`
-              : `${payment.currency} ${payment.amount} / ${payment.premiumDays} days · ${payment.bank}`}
+              : `${formatKes(payment.amount)} / ${payment.premiumDays} days · paid by M-PESA`}
           </p>
         </div>
         <button
@@ -166,7 +198,7 @@ export default function PaymentPanel({ account, config, onPremiumChange }: Props
           onClick={() => setOpen((v) => !v)}
           className="btn btn-ghost shrink-0 px-3 py-1.5 text-xs"
         >
-          {open ? 'Hide' : active ? 'Manage' : 'Pay by paybill'}
+          {open ? 'Hide' : active ? 'Manage' : 'Pay with M-PESA'}
         </button>
       </div>
 
@@ -176,94 +208,114 @@ export default function PaymentPanel({ account, config, onPremiumChange }: Props
         <div className="mt-4 space-y-4">
           {!account ? (
             <p className="text-xs leading-relaxed text-muted">
-              Sign in above first — the payment reference is tied to your account, so your
-              access follows you to any device.
+              Sign in above first — premium is tied to your account, so your access follows you to
+              any device.
             </p>
           ) : (
             <>
-              {/* ── Step 1: the reference ─────────────────────────────────── */}
-              <div className="rounded-xl border border-accent/30 bg-accent/5 p-3.5">
-                <p className="label mb-1">Your account number</p>
-                <div className="flex items-center justify-between gap-3">
-                  <p className="font-mono text-2xl font-bold tracking-wider text-ink">
-                    {intent?.accountNo ?? '—'}
-                  </p>
+              {/* ── The prompt ────────────────────────────────────────────── */}
+              {phase === 'idle' && (
+                <>
+                  <div>
+                    <label className="label" htmlFor="premium-phone">
+                      M-PESA number
+                    </label>
+                    <input
+                      id="premium-phone"
+                      className="field"
+                      inputMode="tel"
+                      autoComplete="tel"
+                      placeholder="0712 345 678"
+                      value={phone}
+                      onChange={(event) => setPhone(event.target.value)}
+                    />
+                  </div>
+
+                  {!commerce.mpesaReady ? (
+                    <p className="rounded-xl border border-warn/30 bg-warn/10 px-3 py-2 text-xs leading-relaxed text-warn">
+                      M-PESA is not accepting payments yet — the owner is still finishing the
+                      Daraja setup.
+                    </p>
+                  ) : (
+                    <p className="text-xs leading-relaxed text-muted">
+                      Press pay and your phone prompts you for the M-PESA PIN. Premium switches on
+                      the moment you confirm.
+                    </p>
+                  )}
+
+                  {payment.instructions && (
+                    <p className="text-xs leading-relaxed text-muted">{payment.instructions}</p>
+                  )}
+
                   <button
                     type="button"
-                    onClick={() => void (intent ? copyAccountNo() : ensureIntent())}
-                    disabled={busy}
-                    className="btn btn-ghost px-3 py-1.5 text-xs"
+                    className="btn btn-primary w-full"
+                    onClick={() => void pay()}
+                    disabled={!commerce.mpesaReady}
                   >
-                    {busy ? <SpinnerIcon className="h-3.5 w-3.5" /> : copied ? 'Copied ✓' : 'Copy'}
+                    Pay {formatKes(payment.amount)}
                   </button>
+                </>
+              )}
+
+              {phase === 'sending' && (
+                <div className="flex items-center gap-3 rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-muted">
+                  <SpinnerIcon className="h-4 w-4" />
+                  Sending the request to M-PESA…
                 </div>
-                <p className="mt-2 text-xs leading-relaxed text-muted">
-                  Pay <span className="font-semibold text-ink">{payment.currency} {payment.amount}</span> to{' '}
-                  <span className="font-semibold text-ink">
-                    {payment.paybill ? `Paybill ${payment.paybill}` : payment.bank}
-                  </span>{' '}
-                  and enter the account number above. Any bank app or M-PESA works.
-                </p>
-              </div>
-
-              {payment.instructions && (
-                <p className="text-xs leading-relaxed text-muted">{payment.instructions}</p>
               )}
 
-              {/* ── Step 2: proof of payment ──────────────────────────────── */}
-              <div>
-                <label className="label" htmlFor="providerRef">
-                  Transaction code (optional)
-                </label>
-                <input
-                  id="providerRef"
-                  className="field"
-                  value={refInput}
-                  maxLength={64}
-                  onChange={(e) => setRefInput(e.target.value)}
-                  placeholder="e.g. SJ42K91LMN from the confirmation SMS"
-                />
-              </div>
+              {/* ── Waiting for the PIN ───────────────────────────────────── */}
+              {phase === 'waiting' && (
+                <div className="rounded-xl border border-accent/30 bg-accent/10 px-4 py-4">
+                  <div className="flex items-center gap-3">
+                    <SpinnerIcon className="h-3.5 w-3.5" />
+                    <p className="text-sm font-semibold text-ink">Check your phone</p>
+                  </div>
+                  <p className="mt-2 text-xs leading-relaxed text-muted">
+                    An M-PESA prompt for {formatKes(charge?.amount ?? payment.amount)} was sent to{' '}
+                    {charge?.phone || phone}. Enter your PIN to complete the payment.
+                  </p>
+                  <p className="mt-2 text-[11px] text-muted/70">
+                    {charge?.mpesaRef ? `Receipt ${charge.mpesaRef} · ` : ''}
+                    Do not close this screen until it confirms.
+                  </p>
+                </div>
+              )}
 
-              <button
-                type="button"
-                onClick={() => void confirmPaid()}
-                disabled={busy || !intent}
-                className="btn btn-primary w-full"
-              >
-                {busy ? (
-                  <>
-                    <SpinnerIcon className="h-4 w-4" /> Sending…
-                  </>
-                ) : intent ? (
-                  'I have paid'
-                ) : (
-                  'Get my payment reference'
-                )}
-              </button>
-
-              {intent?.status === 'rejected' && (
-                <p className="text-xs leading-relaxed text-danger">
-                  {intent.note || 'We could not match that payment to the statement.'}{' '}
-                  {payment.supportContact && <>Contact {payment.supportContact}.</>}
+              {charge?.status === 'paid' && (
+                <p className="rounded-xl border border-ok/30 bg-ok/10 px-3 py-2 text-xs leading-relaxed text-ok">
+                  Paid — {formatKes(charge.amount)}
+                  {charge.mpesaRef ? ` · receipt ${charge.mpesaRef}` : ''}. Premium is active until{' '}
+                  {formatDate(premiumUntil)}.
                 </p>
               )}
 
-              {intent?.status === 'pending' && (
-                <p className="text-xs leading-relaxed text-muted">
-                  Confirmation usually happens the same day. This panel updates itself as soon
-                  as you reload the page.
+              {error && (
+                <p className="text-xs leading-relaxed text-warn" role="alert">
+                  {error}
                 </p>
               )}
 
-              {flash && <p className="text-xs leading-relaxed text-ok">{flash}</p>}
+              {phase === 'error' && (
+                <button
+                  type="button"
+                  className="btn btn-ghost w-full"
+                  onClick={() => {
+                    setError(null);
+                    setPhase('idle');
+                  }}
+                >
+                  Try again
+                </button>
+              )}
+
+              {payment.supportContact && (
+                <p className="text-[11px] leading-relaxed text-muted/70">
+                  Trouble with a payment? Contact {payment.supportContact}.
+                </p>
+              )}
             </>
-          )}
-
-          {error && (
-            <p className="text-xs leading-relaxed text-warn" role="alert">
-              {error}
-            </p>
           )}
         </div>
       )}

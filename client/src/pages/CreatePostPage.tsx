@@ -18,6 +18,7 @@ import HeroBanner from '../components/HeroBanner';
 
 type Kind = Post['type'];
 const MAX_CAPTION = 2000;
+const MAX_MEDIA_BYTES = 32 * 1024 * 1024;
 
 const KINDS: { key: Kind; label: string }[] = [
   { key: 'image', label: 'Image' },
@@ -84,6 +85,9 @@ export default function CreatePostPage({
     if ((type === 'image' || type === 'video') && !file) {
       return type === 'image' ? 'Choose a photo to upload.' : 'Choose a video to upload.';
     }
+    if (file && file.size > MAX_MEDIA_BYTES) {
+      return 'Media must be 32 MB or smaller.';
+    }
     if (type === 'link' && !/^https?:\/\/\S+$/i.test(linkUrl.trim())) {
       return 'The link must start with http:// or https://';
     }
@@ -114,7 +118,7 @@ export default function CreatePostPage({
       let mediaKey: string | undefined;
       if (file) {
         setStage('upload');
-        const uploaded = await uploadMedia(file);
+        const uploaded = await uploadMedia(file, { directUpload: config.media.directUpload });
         mediaKey = uploaded.key;
       }
       setStage('publish');

@@ -11,10 +11,20 @@
  */
 import { useEffect, useState, type ReactNode } from 'react';
 import type { PageProps } from '../shell/pageProps';
-import type { Post, Wallet } from '../types/social';
-import { SocialError, formatKes, getWallet, listMyPosts, timeAgo } from '../lib/social';
+import type { Creator, Post, Wallet } from '../types/social';
+import {
+  SocialError,
+  formatKes,
+  getCreator,
+  getWallet,
+  listMyPosts,
+  saveMyCreatorSubscription,
+  timeAgo,
+} from '../lib/social';
 import { signOutAccount } from '../lib/auth';
 import { Link, navigate } from '../lib/router';
+import { mediaSrc } from '../lib/mediaUrl';
+import MediaImg from '../components/MediaImg';
 import {
   AlertIcon,
   CamIcon,
@@ -66,6 +76,16 @@ export default function ProfilePage({
   const [error, setError] = useState<ErrState | null>(null);
   const [signingOut, setSigningOut] = useState(false);
 
+  // Creator subscription offer — the creator decides free, paid or off.
+  const [creator, setCreator] = useState<Creator | null>(null);
+  const [offerEnabled, setOfferEnabled] = useState(false);
+  const [offerPrice, setOfferPrice] = useState('0');
+  const [offerPeriod, setOfferPeriod] = useState('30');
+  const [offerPerk, setOfferPerk] = useState('');
+  const [savingOffer, setSavingOffer] = useState(false);
+  const [offerError, setOfferError] = useState<string | null>(null);
+  const [offerSaved, setOfferSaved] = useState(false);
+
   const canAck = Boolean(
     config.commerce.adult && account && Number(account.profile?.age) >= 18 && !adultOk,
   );
@@ -85,10 +105,11 @@ export default function ProfilePage({
     (async () => {
       // The count deliberately asks for a single row: only `total` is wanted,
       // the grid below fetches its own page of full posts.
-      const [balance, count, mine] = await Promise.allSettled([
+      const [balance, count, mine, card] = await Promise.allSettled([
         getWallet(),
         listMyPosts({ size: 1 }),
         listMyPosts(),
+        getCreator(Number(account.id)),
       ]);
       if (dead) return;
 
@@ -101,6 +122,14 @@ export default function ProfilePage({
         setTotal(mine.value.total);
       } else if (count.status === 'fulfilled') {
         setTotal(count.value.total);
+      }
+      if (card.status === 'fulfilled') {
+        const next = card.value.creator;
+        setCreator(next);
+        setOfferEnabled(next.subscription.enabled);
+        setOfferPrice(String(next.subscription.price));
+        setOfferPeriod(String(next.subscription.periodDays));
+        setOfferPerk(next.subscription.perk);
       }
       setLoading(false);
     })();
@@ -115,6 +144,31 @@ export default function ProfilePage({
     await signOutAccount();
     onAccountChange(null);
     navigate('/');
+  }
+
+  async function saveOffer() {
+    if (savingOffer) return;
+    setSavingOffer(true);
+    setOfferError(null);
+    setOfferSaved(false);
+    try {
+      const res = await saveMyCreatorSubscription({
+        enabled: offerEnabled,
+        price: Math.max(0, Math.round(Number(offerPrice) || 0)),
+        periodDays: Math.min(365, Math.max(1, Math.round(Number(offerPeriod) || 30))),
+        perk: offerPerk.trim(),
+      });
+      setCreator((current) =>
+        current ? { ...current, subscription: res.subscription } : current,
+      );
+      setOfferPrice(String(res.subscription.price));
+      setOfferPeriod(String(res.subscription.periodDays));
+      setOfferSaved(true);
+    } catch (err) {
+      setOfferError(toError(err).message);
+    } finally {
+      setSavingOffer(false);
+    }
   }
 
   // ── Signed out ────────────────────────────────────────────────────────────
@@ -193,6 +247,18 @@ export default function ProfilePage({
               {gender ? ` · ${gender}` : ''}
             </p>
             {since && <p className="text-xs text-muted">Member since {since}</p>}
+            {creator && (
+              <p className="mt-1 text-xs text-muted">
+                <span className="font-semibold text-ink">{creator.followers}</span> followers
+                {creator.subscription.enabled && (
+                  <>
+                    {' · '}
+                    <span className="font-semibold text-ink">{creator.subscribers}</span>{' '}
+                    subscribers
+                  </>
+                )}
+              </p>
+            )}
           </div>
         </div>
 
@@ -237,6 +303,125 @@ export default function ProfilePage({
           <p className="mt-0.5 text-[11px] text-muted">on posts shown</p>
         </div>
       </div>
+
+      {/* ── Creator subscriptions ───────────────────────────────────────── */}
+      {creator && (
+        <div className="card p-5">
+          <div className="flex flex-wrap items-start justify-between gap-2">
+            <div>
+              <p className="label">Subscriptions</p>
+              <p className="mt-1 text-xs leading-relaxed text-muted">
+                Let people subscribe to you. You choose whether it is free or paid —
+                subscribers unlock every paid post you publish.
+              </p>
+            </div>
+            <Link
+              to={`/creator/${creator.id}`}
+              className="btn btn-ghost shrink-0 px-3 py-1.5 text-xs"
+            >
+              View public page
+            </Link>
+          </div>
+
+          <label className="mt-4 flex cursor-pointer items-center justify-between gap-3 rounded-xl border border-white/10 bg-surface-3/40 px-4 py-3">
+            <span>
+              <span className="block text-sm font-semibold text-ink">Accept subscribers</span>
+              <span className="block text-xs text-muted">
+                {offerEnabled ? 'Your offer is visible on your public page.' : 'Off — nobody can subscribe.'}
+              </span>
+            </span>
+            <input
+              type="checkbox"
+              checked={offerEnabled}
+              onChange={(event) => {
+                setOfferEnabled(event.target.checked);
+                setOfferSaved(false);
+              }}
+              className="h-5 w-5 shrink-0 accent-accent"
+            />
+          </label>
+
+          {offerEnabled && (
+            <div className="mt-3 grid gap-3 sm:grid-cols-2">
+              <div>
+                <label className="label" htmlFor="offer-price">
+                  Price (KES)
+                </label>
+                <input
+                  id="offer-price"
+                  className="field"
+                  inputMode="numeric"
+                  value={offerPrice}
+                  onChange={(event) => {
+                    setOfferPrice(event.target.value.replace(/[^0-9]/g, ''));
+                    setOfferSaved(false);
+                  }}
+                />
+                <p className="mt-1 text-[11px] text-muted">0 = a free subscription.</p>
+              </div>
+              <div>
+                <label className="label" htmlFor="offer-period">
+                  Period (days)
+                </label>
+                <input
+                  id="offer-period"
+                  className="field"
+                  inputMode="numeric"
+                  value={offerPeriod}
+                  onChange={(event) => {
+                    setOfferPeriod(event.target.value.replace(/[^0-9]/g, ''));
+                    setOfferSaved(false);
+                  }}
+                />
+                <p className="mt-1 text-[11px] text-muted">1–365 days per payment.</p>
+              </div>
+              <div className="sm:col-span-2">
+                <label className="label" htmlFor="offer-perk">
+                  What subscribers get
+                </label>
+                <input
+                  id="offer-perk"
+                  className="field"
+                  maxLength={160}
+                  value={offerPerk}
+                  placeholder="Behind the scenes, early posts, subscriber-only updates…"
+                  onChange={(event) => {
+                    setOfferPerk(event.target.value);
+                    setOfferSaved(false);
+                  }}
+                />
+              </div>
+            </div>
+          )}
+
+          {offerError && (
+            <p className="mt-3 rounded-xl border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">
+              {offerError}
+            </p>
+          )}
+          {offerSaved && (
+            <p className="mt-3 rounded-xl border border-ok/30 bg-ok/10 px-3 py-2 text-xs text-ok">
+              Subscription settings saved.
+            </p>
+          )}
+
+          <button
+            type="button"
+            className="btn btn-primary mt-3"
+            onClick={() => void saveOffer()}
+            disabled={savingOffer}
+          >
+            {savingOffer && <SpinnerIcon className="h-4 w-4" />}
+            {savingOffer ? 'Saving…' : 'Save subscription'}
+          </button>
+          {offerEnabled && Number(offerPrice) > 0 && (
+            <p className="mt-2 text-[11px] leading-relaxed text-muted">
+              Paid subscriptions use M-PESA. The house fee is{' '}
+              {config.commerce.commissionRate}% — the rest lands in your wallet.
+            </p>
+          )}
+        </div>
+      )}
 
       {/* ── My posts ────────────────────────────────────────────────────── */}
       <div>
@@ -284,15 +469,14 @@ export default function ProfilePage({
               >
                 {(post.type === 'image' || post.type === 'video') && post.mediaUrl ? (
                   post.type === 'image' ? (
-                    <img
-                      src={post.mediaUrl}
+                    <MediaImg
+                      src={mediaSrc(post.mediaUrl)}
                       alt={post.caption || 'Your post'}
-                      loading="lazy"
                       className="photo h-28 w-full"
                     />
                   ) : (
                     <video
-                      src={post.mediaUrl}
+                      src={mediaSrc(post.mediaUrl)}
                       preload="metadata"
                       muted
                       playsInline

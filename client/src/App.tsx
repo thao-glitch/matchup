@@ -233,6 +233,11 @@ export default function App() {
     s.on('disconnect', onDisconnect);
     s.io.on('reconnect_failed', onReconnectFailed);
 
+    // The HTTP long-poll shim does not auto-connect the way socket.io does.
+    // Without this the first `queue:join` is dropped (emit() is a no-op while
+    // the socket is not wanted), which looks exactly like "nobody is online".
+    s.connect();
+
     return () => {
       s.off('match:found', onMatchFound);
       s.off('match:waiting', onWaiting);
@@ -410,6 +415,18 @@ export default function App() {
     if (s && !s.connected) s.connect();
   }, []);
 
+  // Backstop for the 'down' state: even though the socket now retries
+  // forever on its own, keep knocking from here too if it ever reports
+  // failure — a page left open overnight should recover without a human.
+  useEffect(() => {
+    if (serverStatus !== 'down') return;
+    const id = window.setInterval(() => {
+      const s = socketRef.current;
+      if (s && !s.connected) s.connect();
+    }, 10_000);
+    return () => window.clearInterval(id);
+  }, [serverStatus]);
+
   // ── Render ─────────────────────────────────────────────────────────────────
   const serverDown = serverStatus === 'down';
   const showBanner = serverStatus !== 'ok' && phase !== 'lobby' && !serverDown;
@@ -494,33 +511,24 @@ export default function App() {
         </div>
       )}
 
-      {showBanner && (
-        <div className="fixed inset-x-0 top-0 z-50 flex items-center justify-center gap-2 bg-warn/15 px-4 py-2 text-xs font-medium text-warn backdrop-blur">
-          <AlertIcon className="h-4 w-4" />
-          Signaling connection lost — retrying…
-        </div>
-      )}
-
-      {serverDown && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-surface/90 px-6 backdrop-blur">
-          <div className="card max-w-md p-7 text-center">
-            <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-danger/15 text-danger">
-              <AlertIcon className="h-6 w-6" />
-            </div>
-            <h2 className="text-lg font-semibold text-ink">Unable to connect to the server</h2>
-            <p className="mt-2 text-sm leading-relaxed text-muted">
-              The matchmaking server is unreachable — this can be a maintenance window, a
-              blocked WebSocket, or a network that only allows HTTPS on port 443.
-            </p>
-            <div className="mt-5 flex flex-col gap-2 sm:flex-row sm:justify-center">
-              <button type="button" onClick={retryServer} className="btn btn-primary">
-                Retry
-              </button>
-              <button type="button" onClick={leave} className="btn btn-ghost">
-                Back to start
-              </button>
-            </div>
-          </div>
+      {/* Connectivity is a strip, never a wall: a dropped signaling host is a
+          condition the app rides out, not a dead end that blocks the page. It
+          clears itself the moment the socket reconnects. */}
+      {(serverDown || showBanner) && (
+        <div className="fixed inset-x-0 top-0 z-50 flex items-center justify-center gap-2 bg-warn/15 px-4 py-2 text-center text-xs font-medium text-warn backdrop-blur">
+          <AlertIcon className="h-4 w-4 shrink-0" />
+          <span>
+            {serverDown
+              ? 'Reconnecting to Matchup — this page keeps trying on its own.'
+              : 'Signaling connection lost — retrying…'}
+          </span>
+          <button
+            type="button"
+            onClick={retryServer}
+            className="shrink-0 underline underline-offset-2 hover:text-warn/80"
+          >
+            Retry now
+          </button>
         </div>
       )}
     </div>
