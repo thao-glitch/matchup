@@ -423,7 +423,7 @@ async function main() {
     // The stats HUD must come back on the new peer connection too.
     let pathA2 = null;
     let pathB2 = null;
-    for (let i = 0; i < 10; i++) {
+    for (let i = 0; i < 25; i++) {
       const readPath = (page) =>
         page.evaluate(
           () => (document.body.innerText.match(/Local network|Direct P2P|TURN relay/) || [])[0] || null,
@@ -439,7 +439,15 @@ async function main() {
     // ── 8. Telemetry: the server saw these calls and their media path ───────
     // `call:report` is emitted as soon as the selected candidate pair is known.
     await sleep(1500);
-    const serverStats = await fetch(`${API}/api/stats`).then((r) => r.json()).catch(() => null);
+    // Vercel may serve /api/stats from a different warm instance than the one
+    // that accepted the call report. Poll briefly so the assertion checks the
+    // service, not which lambda happened to answer this request.
+    let serverStats = null;
+    for (let i = 0; i < 10; i++) {
+      serverStats = await fetch(`${API}/api/stats`).then((r) => r.json()).catch(() => null);
+      if ((serverStats?.calls?.outcomes?.connected ?? 0) >= 1) break;
+      await sleep(1000);
+    }
     if (serverStats) {
       assert(
         (serverStats.calls?.outcomes?.connected ?? 0) >= 1,
