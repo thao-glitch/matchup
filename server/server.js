@@ -241,6 +241,27 @@ function sendAuthError(res, err) {
     .json({ error: { code: 'internal', message: 'Something went wrong — please try again.' } });
 }
 
+/**
+ * GET /api/cron/media — daily object-storage lifecycle sweep.
+ *
+ * Vercel Cron sends `Authorization: Bearer ${CRON_SECRET}`. Without the
+ * secret the route is closed, so a public URL cannot be used to trigger
+ * deletions. The admin dashboard has its own authenticated trigger.
+ */
+app.get('/api/cron/media', async (req, res) => {
+  const secret = String(process.env.CRON_SECRET || '').trim();
+  if (!secret || bearerOf(req) !== secret) {
+    return res.status(401).json({ error: { code: 'unauthorized', message: 'Cron secret required.' } });
+  }
+  try {
+    const result = await commerce.pruneMedia({ dryRun: req.query.dryRun === '1' });
+    return res.json(result);
+  } catch (err) {
+    console.error('[cron] media lifecycle failed:', err.message);
+    return res.status(500).json({ error: { code: 'media-prune', message: err.message } });
+  }
+});
+
 /** POST /api/auth/register { username, password, profile } → 201 { token, user } */
 app.post('/api/auth/register', credentialLimiter, async (req, res) => {
   try {
@@ -677,6 +698,7 @@ app.post('/api/media/direct', contentLimiter, async (req, res) => {
           maximumSizeInBytes: 32 * 1024 * 1024,
           addRandomSuffix: false,
           allowOverwrite: false,
+          cacheControlMaxAge: mediaStore.lifecycle().cacheMaxAgeSec,
           validUntil: Date.now() + 10 * 60 * 1000,
         };
       },
@@ -887,6 +909,12 @@ app.get('/api/admin/overview', adminLimiter, adminRoute(async (identity, req, re
 app.get('/api/admin/db', adminLimiter, adminRoute(async () => ({
   database: await admin.databaseStats(),
 })));
+
+/** POST /api/admin/media/prune?dryRun=1 → object-storage/DB lifecycle sweep. */
+app.post('/api/admin/media/prune', adminLimiter, adminRoute(async (identity, req) => {
+  const dryRun = req.query.dryRun === '1' || req.body?.dryRun === true;
+  return admin.pruneMedia(identity, { dryRun });
+}));
 
 app.get('/api/admin/users', adminLimiter, adminRoute(async (identity, req, res) => {
   const { q, filter, page, size } = req.query || {};

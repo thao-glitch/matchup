@@ -24,6 +24,7 @@ import {
   request,
   timeAgo,
   type DayTotal,
+  type MediaPruneResult,
   type OverviewData,
 } from './api';
 import { ErrorBanner, Loading, Panel, Pill, Stat, TH, TD } from './ui';
@@ -38,6 +39,26 @@ export default function OverviewTab() {
   const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
   /** Bumping this re-runs the effect — wired to the manual Refresh button. */
   const [reload, setReload] = useState(0);
+  const [pruneBusy, setPruneBusy] = useState(false);
+  const [prune, setPrune] = useState<MediaPruneResult | null>(null);
+
+  async function runPrune(dryRun: boolean) {
+    if (pruneBusy) return;
+    setPruneBusy(true);
+    try {
+      const result = await request<MediaPruneResult>(
+        `/media/prune${dryRun ? '?dryRun=1' : ''}`,
+        { method: 'POST' },
+      );
+      setPrune(result);
+      setError(null);
+      if (!dryRun) setReload((n) => n + 1);
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setPruneBusy(false);
+    }
+  }
 
   useEffect(() => {
     let disposed = false;
@@ -205,7 +226,7 @@ export default function OverviewTab() {
               title="Database"
               hint={`${data.database.version} · ${data.database.database} · up ${formatUptime(data.database.uptimeSec)} · media: ${data.media?.objectStorage ? 'Vercel Blob' : 'MariaDB'}`}
             >
-              <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
                 <Stat label="Total size" value={formatBytes(data.database.totalBytes)} hint="data + indexes" />
                 <Stat label="Data" value={formatBytes(data.database.dataBytes)} />
                 <Stat label="Indexes" value={formatBytes(data.database.indexBytes)} />
@@ -220,7 +241,63 @@ export default function OverviewTab() {
                   }
                   hint={`${data.database.connections.running} running`}
                 />
+                <Stat
+                  label="Pool"
+                  value={`${data.database.pool.total}/${data.database.pool.limit || '—'}`}
+                  hint={`${data.database.pool.free} free · ${data.database.pool.queued} queued`}
+                />
+                <Stat
+                  label="Read replica"
+                  value={
+                    data.database.replica.configured
+                      ? data.database.replica.healthy
+                        ? 'healthy'
+                        : 'offline'
+                      : 'primary only'
+                  }
+                  tone={
+                    data.database.replica.configured && !data.database.replica.healthy
+                      ? 'warn'
+                      : data.database.replica.healthy
+                        ? 'ok'
+                        : undefined
+                  }
+                  hint={data.database.replica.host || 'set MARIADB_READ_HOST to enable'}
+                />
               </div>
+
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  className="btn btn-ghost px-3 py-1.5 text-xs"
+                  disabled={pruneBusy}
+                  onClick={() => void runPrune(true)}
+                >
+                  {pruneBusy ? 'Checking…' : 'Dry run cleanup'}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-primary px-3 py-1.5 text-xs"
+                  disabled={pruneBusy}
+                  onClick={() => void runPrune(false)}
+                >
+                  Run media cleanup
+                </button>
+                <span className="text-[11px] text-muted">
+                  Keeps every media key still on a post · orphan grace{' '}
+                  {data.media.lifecycle.orphanGraceHours}h · legacy retention{' '}
+                  {data.media.lifecycle.retentionDays}d
+                </span>
+              </div>
+              {prune && (
+                <p className="mt-2 text-[11px] text-muted">
+                  {prune.dryRun ? 'Dry run' : 'Last run'} at {formatClock(new Date(prune.at))}:{' '}
+                  {prune.blob.deleted} Blob object{prune.blob.deleted === 1 ? '' : 's'},{' '}
+                  {prune.database.deleted} legacy DB row{prune.database.deleted === 1 ? '' : 's'},{' '}
+                  {prune.local.deleted} local file{prune.local.deleted === 1 ? '' : 's'} removed.
+                  {prune.blob.errors > 0 && ` ${prune.blob.errors} delete error(s).`}
+                </p>
+              )}
 
               <div className="mt-4 overflow-x-auto">
                 <table className="w-full min-w-[520px]">

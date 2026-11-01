@@ -23,5 +23,8 @@
         { "key": "Referrer-Policy", "value": "strict-origin-when-cross-origin" }
       ]
     }
+  ],
+  "crons": [
+    { "path": "/api/cron/media", "schedule": "0 3 * * *" }
   ]
 }

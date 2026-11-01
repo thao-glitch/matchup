@@ -279,6 +279,19 @@ async function databaseStats() {
   return mariaStore.dbStats();
 }
 
+/** Run the object-storage/DB media lifecycle sweep from the dashboard. */
+async function pruneMedia(admin, opts = {}) {
+  requireDb();
+  const result = await commerce.pruneMedia({ dryRun: Boolean(opts.dryRun) });
+  audit(admin, 'media.prune', result.dryRun ? 'dry-run' : 'live', {
+    blobDeleted: result.blob.deleted,
+    dbDeleted: result.database.deleted,
+    localDeleted: result.local.deleted,
+    referencedKeys: result.referencedKeys,
+  });
+  return result;
+}
+
 // ── Users ────────────────────────────────────────────────────────────────────
 
 async function listUsers(query) {
@@ -574,6 +587,7 @@ module.exports = {
   audit,
   overview,
   databaseStats,
+  pruneMedia,
   listUsers,
   updateUser,
   deleteUser,

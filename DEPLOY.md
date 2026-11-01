@@ -82,6 +82,10 @@ it, and — if `KOYEB_TOKEN` is set — asks Koyeb to pick up the new image.
    | `ADMIN_USERNAME` | your dashboard username |
    | `ADMIN_PASSWORD` | your dashboard password (10+ chars) |
    | `BLOB_READ_WRITE_TOKEN` | Vercel Blob read/write token; keeps uploads out of MariaDB. Connect a Blob store in Vercel → Storage → Connect to Project. |
+   | `MARIADB_POOL_SIZE` | *optional* — connections per instance (default `5`; keep pool × warm instances below `max_connections`) |
+   | `MARIADB_READ_HOST` / `MARIADB_READ_PORT` / `MARIADB_READ_USER` / `MARIADB_READ_PASSWORD` | *optional* — read replica; public feeds use it and fall back to the primary if it is down |
+   | `CRON_SECRET` | authorizes the daily `/api/cron/media` lifecycle sweep |
+   | `MEDIA_ORPHAN_GRACE_HOURS` / `MEDIA_RETENTION_DAYS` | *optional* — Blob orphan grace (24h) and legacy DB retention (30d) |
    | `CORS_ORIGIN` | *optional* — only needed if you later serve the client from a second origin |
    | `CF_TURN_KEY_ID` / `CF_TURN_KEY_SECRET` | *optional* — step 4 |
 

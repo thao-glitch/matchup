@@ -3,8 +3,9 @@
  *
  * The tables live in `mariaStore.js` (one schema, one boot pass) but the
  * queries live here so the money code stays in one readable file. Both share
- * the single connection pool through `mariaStore.query()`: this database runs
- * with `connectionLimit: 5`, and a second pool would only halve the headroom.
+ * the bounded primary pool through `mariaStore.query()`; explicitly
+ * lag-tolerant public reads may use the optional replica through
+ * `mariaStore.queryRead()`. Money, auth and entitlement reads never do.
  *
  * Money rules enforced by this module, not by callers:
  *   • `balance` only ever moves with `UPDATE … SET balance = balance ± ?`,
@@ -24,6 +25,8 @@ const crypto = require('crypto');
 const mediaToken = require('./mediaToken');
 
 const query = (...args) => mariaStore.query(...args);
+/** Explicit opt-in: only lag-tolerant public reads should use this. */
+const readQuery = (...args) => mariaStore.queryRead(...args);
 
 // ── Mapping ──────────────────────────────────────────────────────────────────
 
@@ -216,9 +219,13 @@ async function listPosts({
   creatorId = null,
   all = false,
   status = '',
+  readReplica = false,
 } = {}) {
   const limit = pageSize(size);
   const offset = (pageNumber(page) - 1) * limit;
+  // The public feed tolerates a few seconds of replica lag; "my posts",
+  // moderation and anything just written stay on the primary.
+  const read = readReplica ? readQuery : query;
 
   const where = [];
   const params = [];
@@ -242,11 +249,11 @@ async function listPosts({
   }
 
   const whereSql = `WHERE ${where.join(' AND ')}`;
-  const [countRows] = await query(
+  const [countRows] = await read(
     `SELECT COUNT(*) AS total FROM posts p ${whereSql}`,
     params,
   );
-  const rows = await query(
+  const rows = await read(
     `SELECT p.*, a.country AS country, a.banned_at AS creator_banned,
             (SELECT COUNT(*) FROM post_likes l WHERE l.post_id = p.id) AS like_count,
             (SELECT COUNT(*) FROM post_comments c WHERE c.post_id = p.id AND c.status = 'active') AS comment_count
@@ -401,8 +408,8 @@ async function likePost(postId, accountId, liked) {
   return { liked, likes: Number(rows[0]?.likes_n) || 0 };
 }
 
-async function listComments(postId, limit = 100) {
-  const rows = await query(
+async function listComments(postId, limit = 100, { readReplica = true } = {}) {
+  const rows = await (readReplica ? readQuery : query)(
     `SELECT * FROM post_comments WHERE post_id = ? AND status = 'active' ORDER BY id ASC LIMIT ${Math.min(500, Math.max(1, Number(limit) || 100))}`,
     [Number(postId)],
   );
@@ -808,10 +815,10 @@ async function followCreator(followerId, creatorId, follow = true) {
 }
 
 /** Public creator card: profile, audience counts, offer and this viewer's state. */
-async function getCreator(creatorId, viewerId = null) {
+async function getCreator(creatorId, viewerId = null, { readReplica = false } = {}) {
   const id = Number(creatorId);
   if (!Number.isInteger(id) || id <= 0) return null;
-  const rows = await query(
+  const rows = await (readReplica ? readQuery : query)(
     `SELECT a.id, a.username, a.country, a.created_at, a.banned_at,
             (SELECT COUNT(*) FROM follows f WHERE f.creator_id = a.id) AS followers,
             (SELECT COUNT(*) FROM follows f WHERE f.follower_id = a.id) AS following,

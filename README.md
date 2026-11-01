@@ -203,6 +203,16 @@ Open **two tabs** on `http://localhost:5173`, fill in two complementary profiles
 | `BLOB_READ_WRITE_TOKEN` | production | Vercel Blob token. When set, new uploads go to a private Blob store and the browser uploads directly (no function body limit); unset falls back to `media_blobs` in MariaDB. |
 | `MEDIA_TOKEN_SECRET` | no       | Key for the signed `?t=` claims on paid media URLs. Unset ⇒ a random per-boot key (fine for one instance; set it if you scale past one so links survive restarts/instances) |
 | `MEDIA_TOKEN_TTL_MS` | no       | How long a paid-media claim stays valid (default `3600000` = 1h)     |
+| `MARIADB_POOL_SIZE` | no | Connections per serverless instance (default `5`; keep `pool × warm instances` below `max_connections`) |
+| `MARIADB_QUEUE_LIMIT` | no | Queries allowed to wait for a pooled connection (default `0` = unbounded queue) |
+| `MARIADB_IDLE_TIMEOUT_MS` / `MARIADB_MAX_IDLE` | no | Pool idle eviction (defaults `30000` / `10000`) |
+| `MARIADB_READ_HOST` / `MARIADB_READ_PORT` | no | Optional read replica. When set, public feeds and anonymous creator cards use it; auth, money, entitlement and signed-in viewer state stay on the primary. Falls back automatically if the replica is down. |
+| `MARIADB_READ_USER` / `MARIADB_READ_PASSWORD` / `MARIADB_READ_SSL` | no | Optional replica credentials/TLS overrides (defaults to the primary values) |
+| `MARIADB_READ_POOL_SIZE` | no | Replica pool size per instance (default `5`) |
+| `MEDIA_ORPHAN_GRACE_HOURS` | no | Blob objects without a post are kept this long before cleanup (default `24`) |
+| `MEDIA_RETENTION_DAYS` | no | Legacy unreferenced `media_blobs` rows are removed after this age (default `30`) |
+| `MEDIA_CACHE_MAX_AGE_SEC` | no | Blob cache lifetime for immutable media keys (default `31536000` = 1 year) |
+| `CRON_SECRET` | production | Authorizes the daily `/api/cron/media` lifecycle sweep. Vercel Cron sends it as `Authorization: Bearer …`. |
 
 ### `client/.env.local`
 
@@ -910,17 +920,21 @@ scripts/local.sh stop                   # stops server/relay (MariaDB keeps runn
 
 ## 6. Scaling
 
-The queue lives in memory, which maps 1:1 to a single Node process (that is
-exactly what a single Render instance gives you). To go horizontal:
+The current app is stateless HTTP long-poll signaling against MariaDB/MySQL,
+with media in Vercel Blob. The practical controls are:
 
-1. `npm i @socket.io/adapter-redis` and pass an adapter to `new Server(…)`.
-2. Add `@socket.io/sticky` (or enable sticky sessions on your load balancer) —
-   Socket.io requires it for polling fallbacks.
-3. Move the queue into Redis (`LRANGE`/`LPUSH`/`SREM` with the same match rule),
-   keeping `Matchmaker`'s public API unchanged.
+- **Connection pool:** `MARIADB_POOL_SIZE` keeps `pool × warm instances` below
+  the database's `max_connections`.
+- **Read replica:** set `MARIADB_READ_HOST`; public feeds and anonymous creator
+  cards use it, while auth, money, entitlement and signed-in viewer state stay
+  on the primary.
+- **Media lifecycle:** `/api/cron/media` plus the admin Database panel removes
+  orphaned Blob objects and old unreferenced legacy rows.
+- **Sharding:** a real migration project, not a flag. The phased plan (measure,
+  move media, add replica, partition, shard by `account_id`, keep a global
+  ledger) is in **[docs/SCALING.md](docs/SCALING.md)**.
 
-MongoDB (via `MONGODB_URI`) is already wired for persistence; the memory store is
-only the dev fallback.
+The memory store remains only the local/dev fallback.
 
 ---
 

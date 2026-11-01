@@ -130,6 +130,21 @@ export interface DatabaseTable {
   totalBytes: number;
 }
 
+export interface PoolStats {
+  limit: number;
+  total: number;
+  free: number;
+  queued: number;
+}
+
+export interface ReplicaStatus {
+  configured: boolean;
+  healthy: boolean;
+  host: string;
+  error: string | null;
+  pool: PoolStats;
+}
+
 export interface DatabaseData {
   version: string;
   database: string;
@@ -138,9 +153,36 @@ export interface DatabaseData {
   indexBytes: number;
   tables: DatabaseTable[];
   connections: { current: number; running: number; max: number };
+  pool: PoolStats;
+  replica: ReplicaStatus;
   maxAllowedPacket: number;
   innodbPageSize: number;
   uptimeSec: number;
+}
+
+export interface MediaLifecycle {
+  orphanGraceHours: number;
+  retentionDays: number;
+  cacheMaxAgeSec: number;
+  nativeObjectTtl: boolean;
+}
+
+export interface MediaPruneResult {
+  at: string;
+  dryRun: boolean;
+  orphanGraceHours: number;
+  retentionDays: number;
+  referencedKeys: number;
+  blob: {
+    backend: string;
+    scanned: number;
+    deleted: number;
+    skipped: number;
+    errors: number;
+    dryRun: boolean;
+  };
+  database: { deleted: number; cutoff: string };
+  local: { deleted: number };
 }
 
 export interface OverviewData {
@@ -158,7 +200,13 @@ export interface OverviewData {
   commerce: CommerceSummary;
   store: { mode: string };
   database: DatabaseData | null;
-  media: { backend: string; objectStorage: boolean; private: boolean; directUpload: boolean };
+  media: {
+    backend: string;
+    objectStorage: boolean;
+    private: boolean;
+    directUpload: boolean;
+    lifecycle: MediaLifecycle;
+  };
   config: { features: FeatureFlags; payment: PaymentSettings };
   server: { uptimeSec: number; node: string; now: string };
 }

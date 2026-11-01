@@ -26,11 +26,33 @@ const KEEPALIVE_INTERVAL_MS = 5 * 60 * 1000; // every 5min — keeps hosted DBs 
 // tiers can take a moment to answer a cold connection. 15s fails over to the
 // in-memory store slowly enough to never trigger on a healthy database.
 const CONNECT_TIMEOUT_MS = Number(process.env.MARIADB_CONNECT_TIMEOUT_MS) || 15000;
+
+/** Read an integer env var and clamp it to a safe range. */
+function envInt(value, fallback, min, max) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, Math.trunc(n)));
+}
+
+// A serverless instance can create many short-lived connections. Keep the
+// per-instance pool small by default: 5 × 15 warm instances ≈ 75 connections,
+// which is the production database's current `max_connections`. Raise this
+// only after raising the database limit or adding a proxy (PgBouncer-style).
+const POOL_SIZE = envInt(process.env.MARIADB_POOL_SIZE, 5, 1, 50);
+const READ_POOL_SIZE = envInt(process.env.MARIADB_READ_POOL_SIZE, 5, 1, 50);
+const QUEUE_LIMIT = envInt(process.env.MARIADB_QUEUE_LIMIT, 0, 0, 10000);
+const IDLE_TIMEOUT_MS = envInt(process.env.MARIADB_IDLE_TIMEOUT_MS, 30000, 1000, 600000);
+const MAX_IDLE = envInt(process.env.MARIADB_MAX_IDLE, 10000, 0, 600000);
+
 /** Database names get interpolated into DDL — identifier-safe characters only. */
 const SAFE_DB_NAME = /^[A-Za-z0-9_]+$/;
 
 /** @type {import('mysql2/promise').Pool | null} */
 let pool = null;
+/** Optional read replica. Null means every read stays on the primary. */
+let readPool = null;
+let readHost = '';
+let readError = null;
 let purgeTimer = null;
 let keepaliveTimer = null;
 
@@ -260,7 +282,8 @@ const SCHEMA_POSTS = `
     created_at   TIMESTAMP        NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (id),
     KEY idx_posts_feed (status, created_at),
-    KEY idx_posts_creator (account_id, created_at)
+    KEY idx_posts_creator (account_id, created_at),
+    KEY idx_posts_media (media_key)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 `;
 
@@ -533,21 +556,38 @@ const TLS_TRUST_ERROR =
  * once at boot to create the database itself on servers that ship empty
  * (hosted MySQL hands you a server with no databases of your own).
  */
-function openPool(env, database) {
-  const ssl = resolveSsl(env);
+function openPool(env, database, { read = false } = {}) {
+  const host = read ? env.MARIADB_READ_HOST : env.MARIADB_HOST;
+  const port = read ? env.MARIADB_READ_PORT : env.MARIADB_PORT;
+  const user = read ? env.MARIADB_READ_USER || env.MARIADB_USER : env.MARIADB_USER;
+  const password = read
+    ? env.MARIADB_READ_PASSWORD || env.MARIADB_PASSWORD || ''
+    : env.MARIADB_PASSWORD || '';
+  // A replica may use its own TLS settings (for example, a cross-region
+  // replica with a different CA). Fall back to the primary's settings.
+  const sslEnv = read
+    ? {
+        ...env,
+        MARIADB_SSL: env.MARIADB_READ_SSL ?? env.MARIADB_SSL,
+        MARIADB_SSL_CA: env.MARIADB_READ_SSL_CA ?? env.MARIADB_SSL_CA,
+      }
+    : env;
+  const ssl = resolveSsl(sslEnv);
   const p = mysql.createPool({
-    host: env.MARIADB_HOST || '127.0.0.1',
-    port: Number(env.MARIADB_PORT) || 3306,
-    user: env.MARIADB_USER,
-    password: env.MARIADB_PASSWORD || '',
+    host: host || '127.0.0.1',
+    port: Number(port) || 3306,
+    user,
+    password,
     ...(database ? { database } : {}),
     ...(ssl ? { ssl } : {}),
-    connectionLimit: 5,
+    connectionLimit: read ? READ_POOL_SIZE : POOL_SIZE,
+    waitForConnections: true,
+    queueLimit: QUEUE_LIMIT,
     connectTimeout: CONNECT_TIMEOUT_MS,
     enableKeepAlive: true,
     // Never let a single wedged query pin a connection forever.
-    maxIdle: 10000,
-    idleTimeout: 30000,
+    maxIdle: MAX_IDLE,
+    idleTimeout: IDLE_TIMEOUT_MS,
   });
   // The driver's default connection charset is a 3-byte UTF-8 variant; flag
   // emoji in usernames need 4 bytes. Force utf8mb4 on every pooled connection.
@@ -622,7 +662,8 @@ const SCHEMA_MEDIA_BLOBS = `
     \`key\`    VARCHAR(80) NOT NULL PRIMARY KEY,
     mime       VARCHAR(48) NOT NULL,
     data       LONGBLOB    NOT NULL,
-    created_at BIGINT      NOT NULL DEFAULT 0
+    created_at BIGINT      NOT NULL DEFAULT 0,
+    KEY idx_media_created (created_at)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 `;
 
@@ -653,6 +694,9 @@ async function applySchema() {
   await pool.query(SCHEMA_MEDIA_BLOBS);
   await ensureAccountColumns();
   await ensureChargeColumns();
+  // Existing databases predate these cleanup indexes.
+  await ensureIndex('posts', 'idx_posts_media', 'media_key');
+  await ensureIndex('media_blobs', 'idx_media_created', 'created_at');
   await pool.query(PURGE); // one cleanup per boot too
   await pool.query(PURGE_SESSIONS).catch(() => undefined);
   await pool.query(PURGE_AUDIT).catch(() => undefined);
@@ -679,6 +723,19 @@ async function ensureColumns(table, columns) {
 
 const ensureAccountColumns = () => ensureColumns('accounts', ACCOUNT_COLUMNS);
 const ensureChargeColumns = () => ensureColumns('charges', CHARGE_COLUMNS);
+
+/** Add a missing index once; `CREATE INDEX IF NOT EXISTS` is not portable. */
+async function ensureIndex(table, name, columns) {
+  const [rows] = await pool.query(
+    `SELECT INDEX_NAME AS name FROM INFORMATION_SCHEMA.STATISTICS
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME = ?
+      LIMIT 1`,
+    [table, name],
+  );
+  if (rows.length) return;
+  console.warn(`[store] ${table}.${name} missing — adding it`);
+  await pool.query(`ALTER TABLE \`${table}\` ADD INDEX \`${name}\` (${columns})`);
+}
 
 /**
  * Connect, verify, create the schema and start the retention job.
@@ -739,6 +796,23 @@ async function init(env = process.env) {
     } catch (err2) {
       await close().catch(() => undefined);
       throw err2;
+    }
+  }
+
+  // Optional read replica. A missing/unhealthy replica must never stop the
+  // app: reads fall back to the primary, and the dashboard reports it.
+  if (env.MARIADB_READ_HOST) {
+    readHost = String(env.MARIADB_READ_HOST).trim();
+    try {
+      readPool = openPool(env, dbName, { read: true });
+      await readPool.query('SELECT 1');
+      readError = null;
+      console.info(`[store] read replica connected: ${readHost}`);
+    } catch (err) {
+      readError = err.message;
+      console.warn('[store] read replica unavailable — reads stay on primary:', err.message);
+      await readPool?.end().catch(() => undefined);
+      readPool = null;
     }
   }
 
@@ -812,6 +886,9 @@ async function close() {
   purgeTimer = null;
   if (keepaliveTimer) clearInterval(keepaliveTimer);
   keepaliveTimer = null;
+  if (readPool) await readPool.end().catch(() => undefined);
+  readPool = null;
+  readHost = '';
   if (pool) await pool.end();
   pool = null;
 }
@@ -1319,6 +1396,36 @@ async function accountStats() {
   };
 }
 
+/** One pool's local connection counters — no DB round-trip. */
+function poolSnapshot(p) {
+  const core = p?.pool;
+  const count = (value) => {
+    if (!value) return 0;
+    // mysql2 uses a RingQueue for these pools; a plain array is tolerated too.
+    if (Array.isArray(value._list)) return value._list.filter(Boolean).length;
+    if (Array.isArray(value)) return value.length;
+    if (typeof value.size === 'number') return value.size;
+    return Number(value) || 0;
+  };
+  return {
+    limit: Number(core?.config?.connectionLimit) || 0,
+    total: count(core?._allConnections),
+    free: count(core?._freeConnections),
+    queued: count(core?._connectionQueue),
+  };
+}
+
+/** Replica state for the dashboard; never includes credentials. */
+function readReplicaStatus() {
+  return {
+    configured: Boolean(readHost),
+    healthy: Boolean(readPool),
+    host: readHost,
+    error: readError,
+    pool: poolSnapshot(readPool),
+  };
+}
+
 /**
  * Live database footprint for the admin dashboard.
  *
@@ -1380,6 +1487,8 @@ async function dbStats() {
       running: Number(status.get('Threads_running')) || 0,
       max: Number(vars.get('max_connections')) || 0,
     },
+    pool: poolSnapshot(pool),
+    replica: readReplicaStatus(),
     maxAllowedPacket: Number(vars.get('max_allowed_packet')) || 0,
     innodbPageSize: Number(vars.get('innodb_page_size')) || 0,
     uptimeSec: Number(status.get('Uptime')) || 0,
@@ -1514,6 +1623,45 @@ async function deleteMediaBlob(key) {
 }
 
 /**
+ * Every media key the database still references. Used by the object-storage
+ * lifecycle job as a keep-set before it deletes orphaned Blob objects.
+ */
+async function listMediaKeys() {
+  const rows = await query(
+    `SELECT media_key AS k FROM posts WHERE media_key IS NOT NULL AND media_key <> ''`,
+  );
+  return rows.map((row) => String(row.k)).filter(Boolean);
+}
+
+/**
+ * Delete historical database media that no post references and that is older
+ * than the retention cutoff. New uploads live in Vercel Blob, so this only
+ * touches the legacy `media_blobs` table.
+ *
+ * @returns {Promise<number>} rows deleted (or that would be deleted in dry-run)
+ */
+async function purgeMediaBlobs(cutoffMs, { dryRun = false } = {}) {
+  const cutoff = Number(cutoffMs) || 0;
+  if (dryRun) {
+    const rows = await query(
+      `SELECT COUNT(*) AS n
+         FROM media_blobs mb
+         LEFT JOIN posts p ON p.media_key = mb.key
+        WHERE p.id IS NULL AND mb.created_at < ?`,
+      [cutoff],
+    );
+    return Number(rows[0]?.n) || 0;
+  }
+  const result = await query(
+    `DELETE mb FROM media_blobs mb
+      LEFT JOIN posts p ON p.media_key = mb.key
+      WHERE p.id IS NULL AND mb.created_at < ?`,
+    [cutoff],
+  );
+  return Number(result.affectedRows) || 0;
+}
+
+/**
  * One-time backfill: move files left over from the disk era into the database
  * so a host with a read-only filesystem serves every historical post. Runs on
  * each boot; after the first pass the directory is empty and it no-ops.
@@ -1565,6 +1713,28 @@ async function query(sql, params = []) {
   return result;
 }
 
+/**
+ * Read-only query. Uses the optional replica when configured, and falls back
+ * to the primary if the replica is down or its schema is still catching up.
+ *
+ * Only callers that explicitly tolerate replication lag should use this:
+ * public feeds, creator cards and comment lists. Auth, money, entitlements,
+ * moderation and anything the caller just wrote must use `query()`.
+ */
+async function queryRead(sql, params = []) {
+  if (readPool) {
+    try {
+      const [result] = await readPool.query(sql, params);
+      readError = null;
+      return result;
+    } catch (err) {
+      readError = err.message;
+      console.warn('[store] read replica query failed — using primary:', err.message);
+    }
+  }
+  return query(sql, params);
+}
+
 module.exports = {
   configured,
   init,
@@ -1572,6 +1742,7 @@ module.exports = {
   stats,
   close,
   query,
+  queryRead,
   loadPassport,
   savePassport,
   createAccount,
@@ -1612,4 +1783,6 @@ module.exports = {
   saveMediaBlob,
   getMediaBlob,
   deleteMediaBlob,
+  listMediaKeys,
+  purgeMediaBlobs,
 };

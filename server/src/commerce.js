@@ -260,6 +260,7 @@ async function feed(user, { page, size, q, adult, creatorId } = {}) {
     q,
     adult: showAdult,
     creatorId: creatorId ? Number(creatorId) : null,
+    readReplica: true,
   });
   const items = await socialStore.decorateForViewer(
     result.items,
@@ -449,6 +450,68 @@ async function removePost(user, id, { admin = false } = {}) {
   return post;
 }
 
+/**
+ * Media lifecycle sweep.
+ *
+ * The source of truth is the database: any key still on a post is kept. Blob
+ * objects with no post and older than the grace window are deleted, and the
+ * legacy `media_blobs` rows that no post references are dropped after the
+ * retention window. New uploads are in private object storage, so this does
+ * not touch current media.
+ *
+ * Vercel Blob has no native per-object TTL, so this is the app-level policy.
+ * Run it from the daily cron (`/api/cron/media`) or the admin Database panel.
+ */
+async function pruneMedia({ dryRun = false } = {}) {
+  requireDb();
+  const graceHours = Math.min(
+    24 * 30,
+    Math.max(1, Number(process.env.MEDIA_ORPHAN_GRACE_HOURS) || 24),
+  );
+  const retentionDays = Math.min(
+    3650,
+    Math.max(1, Number(process.env.MEDIA_RETENTION_DAYS) || 30),
+  );
+  const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
+
+  // Legacy DB rows first, so the Blob keep-set is the final set of posts.
+  const dbDeleted = await mariaStore.purgeMediaBlobs(cutoff, { dryRun });
+  const keepKeys = new Set(await mariaStore.listMediaKeys());
+  const blob = await mediaStore.prune({
+    keepKeys,
+    minAgeMs: graceHours * 60 * 60 * 1000,
+    dryRun,
+  });
+
+  // Local disk is only used in no-database development; clean it too so a
+  // developer does not accumulate orphaned test uploads.
+  let localDeleted = 0;
+  try {
+    const entries = await fs.promises.readdir(UPLOAD_DIR, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isFile() || keepKeys.has(entry.name)) continue;
+      const full = path.join(UPLOAD_DIR, entry.name);
+      const stat = await fs.promises.stat(full).catch(() => null);
+      if (!stat || stat.mtimeMs >= cutoff) continue;
+      if (!dryRun) await fs.promises.unlink(full).catch(() => undefined);
+      localDeleted += 1;
+    }
+  } catch (err) {
+    if (err.code !== 'ENOENT') console.warn('[commerce] local media sweep failed:', err.message);
+  }
+
+  return {
+    at: new Date().toISOString(),
+    dryRun,
+    orphanGraceHours: graceHours,
+    retentionDays,
+    referencedKeys: keepKeys.size,
+    blob,
+    database: { deleted: dbDeleted, cutoff: new Date(cutoff).toISOString() },
+    local: { deleted: localDeleted },
+  };
+}
+
 async function like(user, id, liked) {
   requireDb();
   requireUser(user);
@@ -488,7 +551,9 @@ async function addComment(user, id, body) {
 /** Public creator card — profile, audience counts, offer and viewer state. */
 async function creator(user, id) {
   requireDb();
-  const found = await socialStore.getCreator(id, user?.id ?? null);
+  // Anonymous creator cards are public and lag-tolerant. A signed-in viewer
+  // also gets their follow/subscribe state, which must be read-after-write.
+  const found = await socialStore.getCreator(id, user?.id ?? null, { readReplica: !user });
   if (!found) throw new AuthError('not-found', 'That creator does not exist.', 404);
   return { creator: found };
 }
@@ -1006,6 +1071,7 @@ module.exports = {
   postDetail,
   readPostMedia,
   removePost,
+  pruneMedia,
   like,
   listComments,
   addComment,

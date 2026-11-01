@@ -125,6 +125,12 @@ subscriptions(id, subscriber_id, creator_id, status, price, currency, period_day
   send a Bearer header, so the claim is the only credential the media route
   will see from one; it authenticates the viewer, and the route still re-checks
   ownership live, so the claim is never a bypass. Bearer requests work too.
+* Blob has no native per-object TTL. The app-level lifecycle sweep keeps every
+  `posts.media_key`, deletes unreferenced Blob objects older than
+  `MEDIA_ORPHAN_GRACE_HOURS` (default 24h), and removes unreferenced legacy
+  `media_blobs` rows older than `MEDIA_RETENTION_DAYS` (default 30d). It runs
+  daily via `GET /api/cron/media` (Vercel Cron + `CRON_SECRET`) and manually
+  from the admin Database panel. See `docs/SCALING.md`.
 
 ---
 
@@ -246,7 +252,8 @@ pair (deterministic, no glare); each client runs one `Peer` per remote id.
 | Method | Path | Notes |
 | --- | --- | --- |
 | GET | `/api/admin/overview` | dashboard totals, calls, live queue, database footprint, media backend |
-| GET | `/api/admin/db` | MariaDB version, exact data/index sizes, table estimates, connection headroom |
+| GET | `/api/admin/db` | MariaDB version, exact data/index sizes, table estimates, connection headroom, pool and replica state |
+| POST | `/api/admin/media/prune?dryRun=1` | object-storage/legacy-media lifecycle sweep; dry run reports without deleting |
 | GET | `/api/admin/posts?status=&q=&page=&size=` | `{ items, total, page, size }` |
 | PATCH | `/api/admin/posts/:id` | `{ status: 'active'\|'hidden'\|'removed' }` |
 | GET | `/api/admin/charges?status=&page=&size=` | ledger of all new payments |
