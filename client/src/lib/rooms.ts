@@ -94,6 +94,9 @@ export function createRoom(
       );
     });
 
+    // The HTTP long-poll shim only sends once it is started; `emit` before
+    // `connect()` is deliberately dropped. Start the loop, then ask.
+    socket.connect();
     socket.emit('room:create', { token, ...input });
   });
 }
@@ -150,6 +153,9 @@ export function enterRoom(slug: string, handlers: EnterRoomHandlers): AppSocket 
   socket.on('room:closed', handlers.onClosed);
   socket.on('server:error', handlers.onError);
 
+  // Start the long-poll loop before the first emit. Without this the shim
+  // drops `room:enter` and the room page spins forever.
+  socket.connect();
   sendEnter();
   return socket;
 }
