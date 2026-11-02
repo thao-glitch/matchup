@@ -1,17 +1,13 @@
 /**
- * ICE server configuration — the single most important knob for global reach.
+ * ICE server configuration — public STUN only.
  *
- * ┌─ How WebRTC finds a path between two peers ────────────────────────────────┐
- * │ STUN  → discovers each side's public IP:port (works for ~85-90% of NATs).  │
- * │ TURN  → relays the packets when discovery fails: symmetric NAT, double NAT,│
- * │         CGNAT, strict corporate/firewall policies. Without TURN those      │
- * │         users simply never connect — this is the "1 in 10 users can't      │
- * │         call anyone" problem.                                              │
- * └────────────────────────────────────────────────────────────────────────────┘
+ * STUN discovers each side's public IP:port so two browsers can connect
+ * directly. There is no TURN relay in this app: video, audio and the in-call
+ * chat stay peer-to-peer, and a call that cannot find a direct path fails
+ * cleanly instead of silently routing media through a relay.
  *
- * The browser fetches fresh, time-limited TURN credentials from the signaling
- * server (`GET /api/ice`) rather than baking secrets into the JS bundle.
- * See `server/src/iceConfig.js` for the Twilio Network Traversal integration.
+ * The list is fetched from `GET /api/ice` at call time. A local STUN fallback
+ * keeps calls working even if that request is temporarily unavailable.
  */
 
 /** Signaling base URL. Empty string ⇒ same origin (Vite dev proxy / same host). */
@@ -22,8 +18,7 @@ const ICE_URL =
 
 /**
  * STUN-only fallback used before the first `/api/ice` response lands — or if
- * that request fails. STUN is public, unlimited and free; it just can't punch
- * through every NAT.
+ * that request fails. STUN is public, unlimited and free.
  */
 export const FALLBACK_ICE_SERVERS: RTCIceServer[] = [
   { urls: 'stun:stun.l.google.com:19302' },
@@ -31,23 +26,11 @@ export const FALLBACK_ICE_SERVERS: RTCIceServer[] = [
   { urls: 'stun:global.stun.twilio.com:3478' },
 ];
 
-/**
- * TURN credentials live on the *server* (`server/src/iceConfig.js`); this
- * client only ever fetches them from `GET /api/ice`.
- *
- * Configure TURN with one of (server env, see `server/.env.example`):
- *   • TURN_URLS + TURN_SECRET      → coturn REST API, short-lived credentials
- *   • TWILIO_ACCOUNT_SID/AUTH_TOKEN → Twilio Network Traversal
- *   • TURN_URLS + TURN_USERNAME/CREDENTIAL → any static TURN provider
- *
- * Until one of those is set the server answers STUN-only and roughly one in
- * ten users behind symmetric NAT / CGNAT will hit "Unable to connect".
- */
 export interface IceConfig {
   iceServers: RTCIceServer[];
-  /** Epoch ms after which the credentials expire. */
+  /** Epoch ms after which the list should be refreshed. */
   expiresAt: number;
-  /** Which backend minted them: twilio | rest-secret | static-turn | stun-only. */
+  /** This app only serves `stun-only`; the field is kept for diagnostics. */
   source: string;
 }
 
@@ -55,30 +38,19 @@ let cached: IceConfig | null = null;
 let inflight: Promise<IceConfig> | null = null;
 
 /**
- * ICE URL syntax check — the client-side twin of the server's validator in
- * `server/src/iceConfig.js`.
- *
- * The stakes are asymmetric: a TURN server *without credentials* merely wastes
- * an ICE round, but one *malformed URL* makes the browser reject the whole
- * RTCConfiguration (`SyntaxError: ICE server parsing failed: Invalid hostname
- * format`) — `new RTCPeerConnection()` throws and the call can never start.
- * So every URL must parse before we hand the list over.
+ * ICE URL syntax check. One malformed URL makes the browser reject the whole
+ * RTCConfiguration, so every URL must parse before we hand the list over.
  */
 const ICE_URL_RE =
-  /^(stun|stuns|turn|turns):(\[[0-9a-fA-F:.]+\]|[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)(:\d{1,5})?(\?\S*)?$/;
+  /^(stuns?):(\[[0-9a-fA-F:.]+\]|[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)(:\d{1,5})?(\?\S*)?$/;
 
 function isUsable(server: RTCIceServer): boolean {
   const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
-  if (!urls.length || !urls.every((u) => ICE_URL_RE.test(String(u)))) return false;
-  const isTurn = urls.some((u) => String(u).startsWith('turn'));
-  // Never hand a TURN server without credentials to RTCPeerConnection — the
-  // browser would waste an ICE round trying and failing on it.
-  return !isTurn || Boolean(server.username && server.credential);
+  return urls.length > 0 && urls.every((u) => ICE_URL_RE.test(String(u)));
 }
 
 /**
- * Resolve ICE servers, caching until shortly before the TURN credentials
- * expire so a long-lived tab keeps working across credential rotations.
+ * Resolve ICE servers, caching until shortly before the list expires.
  */
 export async function getIceConfig(): Promise<IceConfig> {
   if (cached && cached.expiresAt - 30_000 > Date.now()) return cached;
@@ -88,7 +60,6 @@ export async function getIceConfig(): Promise<IceConfig> {
     try {
       const res = await fetch(ICE_URL, {
         headers: { accept: 'application/json' },
-        // Credentials change per response; never serve a stale copy.
         cache: 'no-store',
       });
       if (!res.ok) throw new Error(`ICE endpoint returned ${res.status}`);
@@ -106,7 +77,7 @@ export async function getIceConfig(): Promise<IceConfig> {
           typeof data.expiresAt === 'number'
             ? data.expiresAt
             : Date.now() + 10 * 60_000,
-        source: data.source ?? 'unknown',
+        source: data.source ?? 'stun-only',
       };
       return cached;
     } catch (err) {

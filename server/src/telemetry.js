@@ -1,14 +1,13 @@
 /**
- * Call outcome telemetry — the number that tells you whether TURN is paying
- * for itself.
+ * Call outcome telemetry — a live view of whether direct peer connections
+ * are working.
  *
  * Each client reports once per room (`call:report`) with the selected ICE
- * candidate-pair type, RTT, duration and which ICE credential source was in
- * use. From that we can answer the only questions that matter:
+ * candidate-pair type, RTT and duration. From that we can answer:
  *
  *   • how many matched pairs actually reach "connected"?   (success rate)
- *   • what share of the failures would TURN have rescued?  (relay vs srflx)
- *   • how many users are stuck on STUN-only?               (config drift)
+ *   • which path did they use — LAN, STUN, or unknown?     (path mix)
+ *   • how many users never found a direct path?            (failed calls)
  *
  * Reports are keyed by roomId so a retry after a failed attempt converges on
  * one row instead of double counting. Everything is in-memory: it is an
@@ -16,7 +15,7 @@
  */
 
 const OUTCOMES = new Set(['connected', 'failed']);
-const PATHS = new Set(['host', 'srflx', 'prflx', 'relay', 'unknown']);
+const PATHS = new Set(['host', 'srflx', 'prflx', 'unknown']);
 
 /** Cap so a long-lived process cannot grow without bound. */
 const MAX_ROOMS = 2000;
@@ -63,7 +62,7 @@ function record(raw) {
     rttMs: num(raw.rttMs, 0, 60_000),
     durationMs: num(raw.durationMs, 0, 24 * 3600 * 1000),
     attempts: num(raw.attempts, 1, 99) ?? 1,
-    iceSource: str(raw.iceSource, new Set(['twilio', 'rest-secret', 'static-turn', 'stun-only']), 'unknown'),
+    iceSource: str(raw.iceSource, new Set(['stun-only']), 'unknown'),
     at: Date.now(),
   };
 
@@ -86,8 +85,8 @@ function snapshot() {
   const connected = all.filter((r) => r.outcome === 'connected');
   const failed = all.filter((r) => r.outcome === 'failed');
 
-  const byPath = { host: 0, srflx: 0, prflx: 0, relay: 0, unknown: 0 };
-  const bySource = { twilio: 0, 'rest-secret': 0, 'static-turn': 0, 'stun-only': 0, unknown: 0 };
+  const byPath = { host: 0, srflx: 0, prflx: 0, unknown: 0 };
+  const bySource = { 'stun-only': 0, unknown: 0 };
   for (const r of all) {
     byPath[r.path] += 1;
     bySource[r.iceSource] += 1;
@@ -95,7 +94,6 @@ function snapshot() {
 
   const rtt = connected.map((r) => r.rttMs).filter((v) => v != null);
   const durations = connected.map((r) => r.durationMs).filter((v) => v != null);
-  const relayed = connected.filter((r) => r.path === 'relay').length;
 
   return {
     since: new Date(since).toISOString(),
@@ -111,8 +109,6 @@ function snapshot() {
         : null,
     },
     paths: byPath,
-    /** Share of connected calls that needed the TURN relay. */
-    relayShare: connected.length ? Math.round((relayed / connected.length) * 1000) / 10 : null,
     iceSources: bySource,
     rttMs: { samples: rtt.length, avg: avg(rtt) },
     durationMs: { samples: durations.length, avg: avg(durations) },

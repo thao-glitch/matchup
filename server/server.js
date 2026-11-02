@@ -8,7 +8,7 @@ const http = require('http');
 const express = require('express');
 const cors = require('cors');
 
-const { getIceConfig, describeIce, isLocalIp } = require('./src/iceConfig');
+const { getIceConfig, describeIce } = require('./src/iceConfig');
 const realtime = require('./src/realtime');
 const telemetry = require('./src/telemetry');
 const store = require('./src/store');
@@ -95,7 +95,7 @@ app.get('/health', async (req, res) => {
     features: settings.get().features,
     // Group calls / conferences that are live right now.
     rooms,
-    // Operational glance: `turnConfigured: false` means strict-NAT users fail.
+    // ICE is STUN-only; video and audio always travel peer-to-peer.
     ice: describeIce(),
     // Where post media lives: `vercel-blob` keeps bytes out of MariaDB.
     media: mediaStore.describe(),
@@ -103,15 +103,12 @@ app.get('/health', async (req, res) => {
 });
 
 /**
- * Returns STUN + (when configured) short-lived TURN credentials.
- * The client never embeds secrets — it asks this endpoint at call time.
+ * Returns the public STUN list used for direct peer-to-peer connections.
+ * There are no relay credentials, so nothing secret is exposed here.
  */
 app.get('/api/ice', async (req, res) => {
   try {
-    // `req.ip` reflects X-Forwarded-For (trust proxy is set) — the tunnel
-    // passes the browser's real address through, so a remote user never sees
-    // the private LAN relay endpoints.
-    const config = await getIceConfig({ local: isLocalIp(req.ip) });
+    const config = await getIceConfig();
     res.set('Cache-Control', 'no-store').json(config);
   } catch (err) {
     console.error('[ice] endpoint failed:', err.message);
@@ -119,7 +116,7 @@ app.get('/api/ice', async (req, res) => {
     res.set('Cache-Control', 'no-store').json({
       iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
       expiresAt: Date.now() + 5 * 60 * 1000,
-      source: 'emergency-fallback',
+      source: 'stun-only',
     });
   }
 });
@@ -129,8 +126,8 @@ app.get('/api/stats', async (req, res) => {
     store.stats(),
     presenceFacade.stats().catch(() => null),
   ]);
-  // `calls` answers "is TURN earning its keep?" — success rate, relay share,
-  // and how much traffic is still running without a relay fallback.
+  // `calls` answers "are direct peer connections succeeding?" — success rate,
+  // path mix, RTT, and how often ICE fails to find a path.
   res.json({ ...db, matchmaking, ice: describeIce(), calls: telemetry.snapshot() });
 });
 

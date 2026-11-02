@@ -9,7 +9,7 @@
 #   docker run -p 4000:4000 --env-file prod.env matchup
 #
 # The image ships NO config: no .env, no database, no secrets. The platform
-# (Koyeb, Render, a VPS) injects PORT, MARIADB_*, ADMIN_* and TURN_*.
+# (Koyeb, Render, a VPS) injects PORT, MARIADB_* and ADMIN_*.
 
 # ── Stage 1: the client bundle ───────────────────────────────────────────────
 FROM node:24-alpine AS client

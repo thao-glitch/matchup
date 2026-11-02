@@ -8,12 +8,6 @@ export interface PeerOptions {
   initiator: boolean;
   localStream: MediaStream;
   iceServers: RTCIceServer[];
-  /**
-   * `'relay'` restricts ICE to TURN candidates only — the "prove the relay
-   * actually works" switch, enabled with `?relay=1` on the URL and used by the
-   * E2E relay test. Defaults to `'all'` (normal P2P-first behaviour).
-   */
-  iceTransportPolicy?: RTCIceTransportPolicy;
   /** Push an SDP/ICE message onto the signaling channel. */
   send: (msg: OutgoingSignal) => void;
   onState: (state: CallState) => void;
@@ -113,18 +107,11 @@ export class Peer {
    * rejects the ICE config outright.
    *
    * `getIceConfig()` already filters malformed URLs, but a constructor throw
-   * here would fail *every* call instead of merely losing the relay path —
-   * and that exact failure has happened in production: one bad `TURN_URLS`
-   * line made `new RTCPeerConnection()` throw
-   * `SyntaxError: ICE server parsing failed: Invalid hostname format` and
-   * video chat died app-wide until the value was caught.
+   * here would fail *every* call instead of merely losing the broken entry.
    */
   private createPeerConnection(): RTCPeerConnection {
     const config: RTCConfiguration = {
       iceServers: this.opts.iceServers,
-      // `'relay'` (from `?relay=1`) forces every candidate through TURN — used
-      // to verify the relay path end to end without needing a strict NAT.
-      iceTransportPolicy: this.opts.iceTransportPolicy ?? 'all',
       // Gather a few candidates in parallel — trades a little bandwidth for a
       // noticeably shorter time-to-first-frame on lossy links.
       iceCandidatePoolSize: 4,
@@ -215,7 +202,7 @@ export class Peer {
     }
   }
 
-  /** Selected candidate pair + RTT — shown in the call HUD ("P2P" vs "TURN"). */
+  /** Selected candidate pair + RTT — shown in the call HUD. */
   async getStats(): Promise<NetworkStats | null> {
     if (this.destroyed) return null;
     try {
@@ -254,7 +241,11 @@ export class Peer {
         ? all.get(pair.remoteCandidateId)?.candidateType
         : undefined;
 
-      const path = (remoteType ?? localType ?? 'host') as PathType;
+      const candidatePath = remoteType ?? localType ?? 'host';
+      const path: PathType =
+        candidatePath === 'host' || candidatePath === 'srflx' || candidatePath === 'prflx'
+          ? candidatePath
+          : 'unknown';
       return {
         path,
         rttMs:

@@ -9,7 +9,7 @@ server**; the server only introduces people and relays a few kilobytes of SDP/IC
 ```
   Browser A  ──WebSocket──▶  Signaling server (Node + Socket.io)  ◀──WebSocket──  Browser B
       │                            matchmaking + SDP relay                                │
-      └──────────────────────── WebRTC (UDP, peer-to-peer, TURN as fallback) ──────────────┘
+      └──────────────────────── WebRTC (UDP, direct peer-to-peer) ──────────────┘
 ```
 
 | Layer      | Tech                                                          |
@@ -17,16 +17,15 @@ server**; the server only introduces people and relays a few kilobytes of SDP/IC
 | Frontend   | React 19 + Vite + TypeScript + Tailwind CSS v4                 |
 | Signaling  | Node.js + Express 5 + Socket.io                                |
 | Database   | MariaDB → MongoDB → in-memory (first one configured wins)      |
-| NAT punch  | STUN + TURN (coturn / Twilio / Cloudflare — any one works)     |
+| NAT punch  | STUN (Google + Twilio; direct P2P, no relay)                   |
 | Deployment | **One container** — app + API + admin on Koyeb/Render/VPS ([DEPLOY.md](DEPLOY.md)) |
 
-**Verified end-to-end**: 43/43 browser E2E checks (match → ICE → both-way video →
+**Verified end-to-end**: 44/44 browser E2E checks (match → ICE → both-way video →
 mute/camera → chat → Spark → rock-paper-scissors duel → hang-up → *Next* →
 re-match → share card → live country board → the Passport → accounts →
-telemetry), 46/46 when pinned through the TURN relay, 28/28 account checks,
-40/40 platform checks (commission split, M-PESA charges, wallets, payouts),
-26/26 dashboard checks, 16/16 signaling checks, plus a live STUN/TURN
-`Allocate` verification. See [Testing](#7-testing).
+telemetry), 28/28 account checks, 40/40 platform checks (commission split,
+M-PESA charges, wallets, payouts), 26/26 dashboard checks, 16/16 signaling
+checks, plus a live STUN reachability check. See [Testing](#7-testing).
 
 **Accounts**: create a username + password once (scrypt-hashed in MariaDB), stay
 signed in on that device, come back later with everything prefilled — and change
@@ -91,7 +90,7 @@ matchup/
 │           ├── signaling.ts          # typed Socket.io client + event contract
 │           ├── rooms.ts              # room socket client (mesh group calls)
 │           ├── peer.ts               # RTCPeerConnection wrapper (the core)
-│           ├── iceServers.ts         # STUN/TURN config fetched from the server
+│           ├── iceServers.ts         # STUN config fetched from the server
 │           ├── auth.ts               # /api/auth client + bearer token in localStorage
 │           ├── social.ts             # /api/posts, /api/wallet, /api/rooms client
 │           ├── router.tsx            # pathname router (no dependency)
@@ -119,7 +118,7 @@ matchup/
 │       ├── rooms.js                  # RoomHub — mesh signaling for group calls
 │       ├── settings.js               # payment/features/commerce/mpesa config + sanitizers
 │       ├── admin.js                  # every dashboard operation + audit trail
-│       ├── iceConfig.js              # STUN + Twilio/coturn/static TURN resolution
+│       ├── iceConfig.js              # public STUN list served to browsers
 │       ├── telemetry.js              # per-call outcome aggregation (/api/stats)
 │       ├── mariaStore.js             # local MariaDB backend (profiles, accounts, social tables)
 │       └── store.js                  # MariaDB → MongoDB → in-memory facade
@@ -127,15 +126,13 @@ matchup/
 ├── scripts/                         # operations + verification
 │   ├── mariadb-init.sql             # one-time: create the database + app user
 │   ├── local.sh                     # start / stop / status the local signaling server
-│   ├── turn-up.sh                   # (re)create coturn with production settings
 │   ├── test-signaling.js            # 16 checks against the live server
 │   ├── test-db.js                   # is the app really linked to the database?
 │   ├── test-auth.js                 # 28 checks: the whole account lifecycle
 │   ├── test-admin.js                # 26 checks: the dashboard (login, ledger, bans)
 │   ├── test-platform.js             # 40 checks: posts, M-PESA charges, commission, wallets
 │   ├── test-ui.js                   # 15 checks: the social shell renders, tabs resolve
-│   ├── test-turn.js                 # real STUN Allocate against your TURN server
-│   ├── e2e.js                       # 43 checks (46 with E2E_RELAY=1): Chromium + WebRTC
+│   ├── e2e.js                       # 44 checks: Chromium + WebRTC
 │   └── package.json                 # e2e needs puppeteer-core only
 │
 ├── docs/
@@ -192,12 +189,6 @@ Open **two tabs** on `http://localhost:5173`, fill in two complementary profiles
 | `MARIADB_USER` / `MARIADB_PASSWORD` | for local DB | App user from `scripts/mariadb-init.sql`          |
 | `MARIADB_DATABASE`   | for local DB | Set it ⇒ MariaDB is used ([details](#55-keeping-the-database-on-this-pc-mariadb)) |
 | `MONGODB_URI`        | alt      | MongoDB instead (used only when `MARIADB_DATABASE` is empty)       |
-| `TURN_URLS`          | prod     | TURN endpoint(s) — see [Deploying TURN](#54-deploying-turn)        |
-| `TURN_SECRET`        | prod     | coturn REST API: must equal coturn's `static-auth-secret`          |
-| `TURN_CREDENTIAL_TTL_SEC` | no  | TURN credential lifetime in seconds (default `600`)                |
-| `TURN_USERNAME` / `TURN_CREDENTIAL` | alt | Static credentials (instead of `TURN_SECRET`)              |
-| `TWILIO_ACCOUNT_SID` | alt      | Twilio Network Traversal (short-lived TURN credentials)            |
-| `TWILIO_AUTH_TOKEN`  | alt      | ↑                                                                |
 | `PRESENCE_INTERVAL_MS` | no     | Live counter push interval (default `5000`)                        |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | no | Creates the first `/admin` dashboard login on the very first boot (10+ chars). Ignored afterwards — the dashboard owns its credentials |
 | `BLOB_READ_WRITE_TOKEN` | production | Vercel Blob token. When set, new uploads go to a private Blob store and the browser uploads directly (no function body limit); unset falls back to `media_blobs` in MariaDB. |
@@ -278,47 +269,43 @@ A small, dependency-free `RTCPeerConnection` wrapper instead of `simple-peer`
 * **Watchdog** — ICE can hang forever in `checking`; after 20 s we restart, after
   2 more attempts we surface **"Unable to connect"** with *Try again* / *Find
   someone else*.
-* **Path readout** — `getStats()` shows `Local network` / `Direct P2P` / `TURN
-  relay` plus RTT in the call header, so you can *see* whether traffic is P2P.
+* **Path readout** — `getStats()` shows `Local network` / `Direct P2P` plus RTT
+  in the call header, so you can *see* how the peer connection is doing.
 
 Connection states → UI: `connecting` · `connected` · `reconnecting` · `failed`.
 
-### 4.4 Global optimization (STUN/TURN)
+### 4.4 Direct connectivity (STUN only)
 
 ```
-STUN  → discovers each side's public IP:port. Free, global, enough for ~85-90% of NATs.
-TURN  → relays the media when discovery fails. REQUIRED for symmetric NAT, double NAT,
-        CGNAT and strict corporate firewalls, otherwise those users never connect.
+STUN → discovers each side's public IP:port. Free, global, and enough for most
+       home and mobile networks to build a direct peer-to-peer path.
 ```
 
-* Google STUN (`stun:stun.l.google.com:19302` …) + Twilio's global STUN are
+* Google STUN (`stun:stun.l.google.com:19302` …) and Twilio's global STUN are
   configured in `server/src/iceConfig.js`.
-* The browser fetches `GET /api/ice` at call time, so **no secret ships in the JS
-  bundle**. Resolution priority: **Twilio Network Traversal** → **coturn REST API
-  (`TURN_SECRET`)** → **static `TURN_*` credentials** → STUN-only fallback. Failures
-  degrade instead of 500ing, so a TURN outage never takes the app down.
-* Which mode am I in? `GET /health` → `ice: { source, turnConfigured, turnHosts }`.
-* ⚠️ With none of those set you are running **STUN-only**: most users are fine, but
-  roughly one in ten on strict networks gets "Unable to connect". See
-  [Deploying TURN](#54-deploying-turn) — it is a ~30 minute job.
+* The browser fetches `GET /api/ice` at call time. There are **no relay
+  credentials and no TURN server**: video, audio and the in-call chat are
+  peer-to-peer, and the server only relays a few KB of SDP/ICE signaling.
+* `GET /health` → `ice: { source: "stun-only", stunHosts, cachedUntil }`.
+* If two networks cannot build a direct path, the call fails cleanly with
+  **"Unable to connect"**. The user can retry, find someone else, or switch
+  networks (Wi-Fi ↔ mobile data often helps). There is no hidden relay bill.
 
-**Measuring whether TURN is paying off.** Every call sends one `call:report`
-(selected ICE candidate pair, RTT, duration, credential source). They aggregate in
-`GET /api/stats` → `calls`:
+**Call telemetry.** Every call sends one `call:report` (selected ICE candidate
+pair, RTT, duration). They aggregate in `GET /api/stats` → `calls`:
 
 ```jsonc
 {
   "outcomes": { "connected": 42, "failed": 3, "successRate": 93.3 },
-  "paths":    { "host": 4, "srflx": 31, "relay": 7, "prflx": 0, "unknown": 0 },
-  "relayShare": 18.4,            // share of connected calls that needed TURN
-  "iceSources": { "rest-secret": 45, "stun-only": 0, ... },
+  "paths":    { "host": 4, "srflx": 31, "prflx": 0, "unknown": 0 },
+  "iceSources": { "stun-only": 45, "unknown": 0 },
   "rttMs": { "samples": 42, "avg": 47 }
 }
 ```
 
-`outcomes.failed` is the number that matters: every one of those is a user who saw
-"Unable to connect". `paths.relay` tells you how many of your working calls TURN is
-carrying (and therefore what it costs you in bandwidth).
+`outcomes.failed` is the number that matters: every one of those is a user who
+saw "Unable to connect". `paths.host` / `paths.srflx` show how successful calls
+found each other.
 
 ### 4.5 Accounts, sessions and the post-call flow
 
@@ -465,10 +452,9 @@ and `GET /api/config` hands the switches to the lobby.
 ## 5. Deployment
 
 > **Run it fully independently → [DEPLOY.md](DEPLOY.md)** — one container (app +
-> API + WebSocket + `/admin`) on free Koyeb, free Aiven MySQL, free Cloudflare
-> TURN. No credit card, no GitHub, no separate frontend host, and your PC can
-> be switched off. The sections below cover the classic paths (Render
-> blueprint, TURN, local MariaDB).
+> API + WebSocket + `/admin`) on free Koyeb and free Aiven MySQL. No credit
+> card, no GitHub, no separate frontend host, and your PC can be switched off.
+> The sections below cover the classic paths (Render blueprint, local MariaDB).
 >
 > **Payments → [docs/PAYMENTS.md](docs/PAYMENTS.md)** — accepting money by
 > M-PESA STK push, and what to ask Safaricom for so the cash lands on your
@@ -487,7 +473,6 @@ and `GET /api/config` hands the switches to the lobby.
 3. Environment variables (Dashboard → Environment):
    * `CORS_ORIGIN=https://your-app.vercel.app`
    * `MONGODB_URI=…` (optional, e.g. MongoDB Atlas free tier)
-   * `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` (**recommended**)
 4. Copy the service URL, e.g. `https://matchup-signaling.onrender.com`.
 5. Smoke-test: `curl https://…/health` → `{"status":"ok",…}`.
 
@@ -550,224 +535,20 @@ open http://localhost:4000        # the whole app
 If you'd rather build the client on the host (`cd client && npm run build`),
 the server still auto-detects `client/dist` and serves the SPA exactly as before.
 
-### 5.4 Deploying TURN
+### 5.4 Network connectivity (STUN only)
 
-TURN is the difference between "works for most people" and "works for everyone".
-Pick one:
+Matchup does **not** run or require a TURN relay. Calls are direct peer-to-peer:
 
-| | Setup | Cost | Best for |
-| --- | --- | --- | --- |
-| **A. Self-hosted coturn** | ~30 min (below) | flat ~$5/mo + bandwidth | production, predictable spend |
-| **A′. coturn on this PC** | `scripts/turn-up.sh` + one router rule | free (your own line) | **this deployment** — needs a real public IPv4 |
-| **B. Twilio Network Traversal** | 2 env vars | per-request | zero ops |
-| **C. Hosted TURN (Metered, Cloudflare Calls…)** | 3 env vars | free tier → per-minute | quick start |
+* `server/src/iceConfig.js` serves a public STUN list from `GET /api/ice`.
+* The client validates every ICE URL before creating `RTCPeerConnection`.
+* No `TURN_*`, `CF_TURN_*` or `TWILIO_*` variables are needed; none are read.
+* If direct ICE fails, the UI explains the network problem and offers **Try
+  again** / **Find someone else**. Chat events still travel over the signaling
+  socket, independent of whether media connects.
+* `GET /health` reports `ice.source: "stun-only"`.
 
-All three end in the same env vars on the signaling server — the client never
-changes.
-
-#### Option A — coturn, step by step (recommended)
-
-**1. Server.** Any VPS with a public IP (Hetzner, DigitalOcean, OVH, Contabo…).
-1 vCPU / 1 GB is plenty; **bandwidth is the real budget**: a relayed 1v1 call
-pushes ~2.25 GB/hour through the box (both directions), so a 1 TB plan covers
-≈ 440 relayed hours.
-
-**2. Install and enable**
-
-```bash
-sudo apt-get update && sudo apt-get install -y coturn
-sudo sed -i 's/#TURNSERVER_ENABLED.*/TURNSERVER_ENABLED=1/' /etc/default/coturn
-```
-
-**3. Generate the shared secret** (this exact value goes to the app too):
-
-```bash
-openssl rand -hex 32     # → e.g. 9f2c…c71a
-```
-
-**4. Configure `/etc/turnserver.conf`**
-
-```ini
-listening-port=3478
-tls-listening-port=5349
-
-# Credentials: short-lived, minted by the signaling server (TURN REST API).
-lt-cred-mech
-use-auth-secret
-static-auth-secret=9f2c…c71a          # ← same value as TURN_SECRET
-realm=turn.example.com                 # ← hostname used in TURN_URLS
-
-# Reachability: TURN over TCP/TLS saves users on UDP-blocking networks.
-fingerprint
-no-multicast-peers
-
-# Relay port range (must be open in the firewall; narrow it to shrink the rule).
-min-port=49152
-max-port=65535
-
-# If this box already runs a web server, don't fight it for :443 — use 5349
-# (turns:…:5349?transport=tls) instead of 443.
-```
-
-> Never add `--allow-loopback-peers` in production: it exists only so the local
-> E2E relay test can run two browsers on one machine.
-
-**5. Firewall**
-
-```bash
-sudo ufw allow 3478/udp && sudo ufw allow 3478/tcp   # STUN/TURN
-sudo ufw allow 5349/tcp                              # TURN over TLS
-sudo ufw allow 49152:65535/udp                       # relayed media
-# Optional, only if you serve turns: on 443 —  sudo ufw allow 443/tcp
-```
-
-**6. TLS certificate** (only for `turns:` — plain `turn:` works without it):
-
-```bash
-sudo apt-get install -y certbot
-sudo certbot certonly --standalone -d turn.example.com
-# then in turnserver.conf:
-#   cert=/etc/letsencrypt/live/turn.example.com/fullchain.pem
-#   pkey=/etc/letsencrypt/live/turn.example.com/privkey.pem
-```
-
-**7. DNS:** `turn.example.com` → A record → the VPS public IP.
-
-**8. Start it:** `sudo systemctl enable --now coturn` (config edits need a restart).
-
-**9. Point the signaling server at it** (`server/.env`, or Render → Environment):
-
-```bash
-TURN_URLS=turn:turn.example.com:3478?transport=udp,turns:turn.example.com:5349?transport=tls
-TURN_SECRET=9f2c…c71a
-# TURN_CREDENTIAL_TTL_SEC=600        # optional, credential lifetime
-```
-
-Restart the server. `GET /health` must now say:
-
-```jsonc
-"ice": { "source": "rest-secret", "turnConfigured": true, "turnHosts": ["turn.example.com:3478"] }
-```
-
-**10. Verify — green only when the relay truly works end to end:**
-
-```bash
-# 1. Real STUN Allocate + CreatePermission against your TURN server:
-npm run test:turn
-
-# 2. Two browsers forced through TURN, media must flow:
-npm run test:e2e:relay
-
-# 3. Manual: open your app with ?relay=1 — the call header must read
-#    "TURN relay" (without it: "Local network" / "Direct P2P").
-
-# 4. Watch the mix:  curl -s <server>/api/stats | jq .calls
-```
-
-> **Local dry run (no VPS needed).** Rehearse the whole flow with:
-> `podman run -d --name turn --network=host coturn/coturn -n -v --fingerprint
-> --use-auth-secret --static-auth-secret=<secret> --realm=matchup.test
-> --listening-port=3478 --min-port=49152 --max-port=65535 --allow-loopback-peers`
-> — then set `TURN_URLS=turn:127.0.0.1:3478?transport=udp` and run
-> `npm run test:turn`. The `--allow-loopback-peers` flag is only needed because
-> both test browsers sit on `127.0.0.1`; coturn rejects loopback peers by default
-> (`403 Forbidden IP`) — a symptom you will only ever see locally.
-
-#### Option A′ — coturn on *this* PC (what this deployment runs)
-
-No VPS is needed when your own line has a **real public IPv4**. Check with
-`curl -4 ifconfig.me`: if the answer falls inside `100.64.0.0/10` you're behind
-CGNAT and inbound ports are impossible — anything else can be forwarded. This
-machine qualifies (`102.212.238.161`), so the relay sits here next to the
-signaling server and the database.
-
-**1. Container** — `scripts/turn-up.sh` creates it with the three settings that
-separate a production relay from a local toy:
-
-```bash
-scripts/turn-up.sh      # idempotent: no-op when the config already matches
-```
-
-| setting | why it matters |
-| --- | --- |
-| `--external-ip=<public>/<private>` | without it coturn advertises `192.168.0.101` as the relay address, which remote peers can't reach — the relay is configured, working, and *never gets used* |
-| `--min-port=49152 --max-port=49408` | 257 ports instead of the default 16 384 — small enough for a consumer router (~128 concurrent relays; raise both ends as you grow) |
-| `--total-quota=40` + `--no-cli` + `--no-multicast-peers` | caps relay usage on a home uplink, keeps the telnet CLI closed |
-
-`--allow-loopback-peers` **stays on** here, unlike a VPS: both E2E relay
-browsers run on this machine, and only private-source callers are ever handed
-the loopback URL (see step 3).
-
-**2. Auto-start** — `matchup-turn.service` (systemd user unit, **enabled**)
-runs `turn-up.sh` before following the container's logs. The public IP is
-re-detected on every run, so a changed ISP address is picked up at boot.
-
-**3. Two URL lists** (`server/.env`) — `/api/ice` serves them by source
-address:
-
-```bash
-TURN_URLS=turn:102.212.238.161:3478?transport=udp,turn:102.212.238.161:3478?transport=tcp
-TURN_URLS_LOCAL=turn:192.168.0.101:3478?transport=udp,turn:127.0.0.1:3478?transport=udp
-TURN_SECRET=matchupdevsecret
-```
-
-A browser arriving through the tunnel gets **only the public addresses**. A
-request from a loopback/LAN source — `npm run test:turn`, `npm run dev`, the
-local E2E relay run — gets `TURN_URLS_LOCAL` first, because home routers
-rarely hairpin NAT (your public address doesn't work from inside your own
-network) and a private address is useless — and an unnecessary leak — to
-everyone else.
-
-**4. Router port forwarding — the one step only you can do.** In your router
-(typically `http://192.168.0.1`), forward to `192.168.0.101`:
-
-| Protocol | Port(s) | → Host | Carries |
-| --- | --- | --- | --- |
-| UDP | 3478 | 192.168.0.101 | STUN/TURN signalling |
-| TCP | 3478 | 192.168.0.101 | TURN on networks that block UDP |
-| UDP | 49152-49408 | 192.168.0.101 | relayed media |
-
-Give this PC a **DHCP reservation** so `192.168.0.101` never drifts.
-
-**5. Verify — and only an *outside* test counts:**
-
-```bash
-npm run test:turn        # run from here → checks the LAN endpoint,
-                         # "allocation granted → 102.212.238.161:49xxx"
-                         # proves external-ip, not internet reachability
-npm run test:e2e:relay   # two browsers, media forced through the relay
-```
-
-Then open `https://your-app.vercel.app/?relay=1` **on a phone using mobile
-data**, match it with this PC (also `?relay=1`), and confirm the call header
-reads **"TURN relay"**. That is the test that proves port 3478 + the relay
-range are reachable from the internet — no local command can.
-
-**6. When your ISP changes your IP:** re-run `scripts/turn-up.sh`, then
-`systemctl --user restart matchup`. The relay address is read by the server at
-runtime, so **no Vercel redeploy** is required (unlike `VITE_SIGNALING_URL`).
-
-> A relayed 720p call pushes ≈2.25 GB/hour through your uplink; `--total-quota`
-> and the fact that TURN is only a fallback keep that in check while the app is
-> small. Graduate to Option A (a VPS) when traffic outgrows the line.
-
-#### Option B — Twilio Network Traversal
-
-```bash
-TWILIO_ACCOUNT_SID=ACxxxx
-TWILIO_AUTH_TOKEN=xxxx
-```
-
-That's it: Twilio's `/Tokens.json` response is minted, cached and refreshed a
-minute before expiry; the client picks it up through `/api/ice`.
-
-#### Option C — hosted TURN with static credentials
-
-```bash
-TURN_URLS=turn:turn.example.com:3478?transport=udp
-TURN_USERNAME=matchup
-TURN_CREDENTIAL=<from-your-provider>
-```
+No firewall rule, container, systemd unit or hosted relay account is part of
+this deployment.
 
 ### 5.5 Keeping the database on this PC (MariaDB)
 
@@ -889,21 +670,20 @@ systemctl --user daemon-reload && systemctl --user enable --now matchup
 loginctl enable-linger $USER          # boot-time start, not just at login
 ```
 
-**6. The relay and one command for everything.** The running stack is three
-units (the tunnel and its watchdog are gone — see §5.2):
+**6. One command for everything.** The running stack is two units (the tunnel
+and its watchdog are gone — see §5.2):
 
 | Unit | Enabled? | Why |
 | --- | --- | --- |
 | `mariadb` (system) | ✅ | owns your data |
 | `matchup` (user) | ✅ | waits for MariaDB, then serves API + signaling |
-| `matchup-turn` (user) | ✅ | coturn — `scripts/turn-up.sh` first, then follows its logs |
 
 `scripts/local.sh` starts, repairs and reports the local stack:
 
 ```bash
 scripts/local.sh status                 # units + health (reports the public API status too)
-scripts/local.sh start                  # start/repair server (+ coturn when installed)
-scripts/local.sh stop                   # stops server/relay (MariaDB keeps running)
+scripts/local.sh start                  # start/repair the signaling server
+scripts/local.sh stop                   # stops the server (MariaDB keeps running)
 ```
 
 **Operational notes**
@@ -977,11 +757,7 @@ npm run test:admin
 # system Chromium.
 npm run test:ui
 
-# TURN: real STUN Allocate + CreatePermission against the configured relay
-# (exit 2 = TURN not configured — see README → "Deploying TURN")
-npm run test:turn
-
-# End-to-end: 43 checks — two real Chromium pages, fake camera/mic, full
+# End-to-end: 44 checks — two real Chromium pages, fake camera/mic, full
 # WebRTC handshake both ways, controls, the in-call playground (chat
 # round-trip, Spark card on both screens, duel resolving identically),
 # hang-up → post-call screen → Next,
@@ -991,14 +767,11 @@ npm run test:turn
 # account create/reload/save/sign-out, telemetry
 npm run test:e2e
 
-# End-to-end through the TURN relay: 46 checks — same as above plus
-# `?relay=1` (ICE pinned to TURN) and assertions that media really relays
-npm run test:e2e:relay
 ```
 
-`test:e2e` / `test:e2e:relay` launch system Chromium (`/usr/bin/chromium`)
-through `puppeteer-core` with `--use-fake-device-for-media-stream`, so they need
-no real camera. The relay variant requires TURN to be configured.
+`test:e2e` launches system Chromium (`/usr/bin/chromium`) through
+`puppeteer-core` with `--use-fake-device-for-media-stream`, so it needs no real
+camera.
 
 **Point the same suite at the deployed stack** — the frontend on Vercel and the
 server behind a tunnel are two different origins, so `APP_URL` (what the
@@ -1019,17 +792,10 @@ node scripts/e2e.js
 | --- | --- |
 | "Camera / microphone blocked" | Grant permission in the address bar; serve over HTTPS (localhost is exempt). |
 | "Unable to reach signaling server" banner | `CORS_ORIGIN` doesn't include your frontend URL, or the service is asleep. |
-| Stuck on **Connecting**, then "Unable to connect" | Almost always a NAT/firewall problem → [Deploying TURN](#54-deploying-turn). Check the header readout: if it never leaves `Connecting`, ICE found no path. `curl /api/stats \| jq .calls.outcomes` shows how often this happens. |
+| Stuck on **Connecting**, then "Unable to connect" | Almost always a NAT/firewall problem. Check the header readout: if it never leaves `Connecting`, ICE found no direct path. Retry, or switch between Wi-Fi and mobile data. `curl /api/stats \| jq .calls.outcomes` shows how often this happens. |
 | Connects but no audio | Browser tab autoplay policy; click the page once. Check the mic toggle (red = muted). |
 | Works locally, fails in production | Mixed content (page served over HTTPS but `VITE_SIGNALING_URL` is `http://`). Always use `https://`. |
-| High latency / choppy video | Check the RTT readout; lower the resolution cap in `LOCAL_MEDIA_CONSTRAINTS`, or add a closer TURN region. |
-| `npm run test:turn` exits **2** | TURN not configured — `/api/ice` is serving STUN-only. Set `TURN_URLS` + `TURN_SECRET` (or `TWILIO_*`). |
-| `test:turn` fails with **401** | `TURN_SECRET` ≠ coturn's `static-auth-secret`, or the client minted the username timestamp as *issue* time instead of *expiry*. Compare `curl /api/ice` with `static-auth-secret` in `turnserver.conf`. |
-| `test:turn` times out on Allocate | coturn not reachable: port 3478/udp blocked, wrong `TURN_URLS` host, or the service isn't running (`journalctl -u coturn`). |
-| Browser `?relay=1` never connects, coturn logs **403 Forbidden IP** | coturn refuses loopback peers (local testing only) → add `--allow-loopback-peers`. Never do this on a VPS; the PC deployment in [A′](#option-a-coturn-on-this-pc-what-this-deployment-runs) keeps it on purpose, because only private-source callers are ever handed the loopback URL. |
-| `test:turn` passes but **remote** users still can't relay | Reachability, not credentials: 3478 (udp+tcp) and 49152-49408/udp aren't forwarded to `192.168.0.101`, or you're behind **double NAT** (the router's WAN is `10.x` / `192.168.x` / `100.64.x`). The only proof that counts is from outside: a phone on **mobile data** opening `?relay=1` must show **"TURN relay"**. |
-| `test:turn` reports it tested `turn:192.168.0.101…` | Expected — `/api/ice` is source-aware: callers from a private address get `TURN_URLS_LOCAL` first (your public address doesn't hairpin through most home routers). Remote browsers only ever receive `TURN_URLS`. |
-| Relay works but the bill is scary | `curl /api/stats \| jq .calls` → `relayShare` tells you what share of traffic you pay for. `srflx`/`host` are free. |
+| High latency / choppy video | Check the RTT readout and lower the resolution cap in `LOCAL_MEDIA_CONSTRAINTS`. |
 | `npm run test:db` exits **2** | `MARIADB_*` not in `server/.env` — run the §5.5 step 2 command (or add the five lines by hand). |
 | `test:db`: **cannot connect** | `sudo systemctl start mariadb`, or wrong `MARIADB_PORT`. `journalctl -u mariadb` has the details. |
 | `Access denied for user 'matchup'@…` | Wrong password in `server/.env`, or the init script wasn't run — re-run `scripts/mariadb-init.sql` (it is idempotent). |
@@ -1064,10 +830,10 @@ Two different problems get confused constantly:
 
 | | Question | Lever |
 | --- | --- | --- |
-| **Reach (technical)** | Can two browsers build a video path? | STUN + [TURN](#54-deploying-turn) |
+| **Reach (technical)** | Can two browsers build a video path? | STUN + a working direct network |
 | **Distribution (growth)** | Does anyone ever hear about the app? | the playbook below |
 
-STUN/TURN is already handled in §4.4/§5.4. Distribution is where the leverage is.
+STUN is already handled in §4.4/§5.4. Distribution is where the leverage is.
 
 ### 9.1 Globally, through browsers
 
@@ -1115,7 +881,8 @@ anything that puts that URL in front of a captive audience works:
 * You collect age/gender/country: publish a privacy policy and an age gate
   before running paid ads.
 * Watch `GET /api/stats` → `calls.outcomes.successRate` while scaling. Growth
-  that lands users on "Unable to connect" is wasted spend — TURN is the fix.
+  that lands users on "Unable to connect" is wasted spend — improve onboarding
+  and network guidance before buying more traffic.
 
 ### 9.4 Reaching one place (Europe-first) without fencing the app
 

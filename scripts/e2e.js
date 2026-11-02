@@ -27,13 +27,6 @@ const API = process.env.API_URL || APP;
  * The 1v1 video app lives at `/match` — the site root is now the social feed.
  */
 const MATCH = `${APP}/match`;
-/**
- * `E2E_RELAY=1 npm run test:e2e` pins ICE to TURN (`?relay=1` in the app) and
- * additionally asserts that the media path really is `TURN relay` — the
- * end-to-end proof that the relay configured on the server works in a browser.
- * Requires TURN to be configured (see README → "Deploying TURN").
- */
-const FORCE_RELAY = Boolean(process.env.E2E_RELAY);
 const results = [];
 const ok = (m) => { results.push('ok: ' + m); console.log('ok: ' + m); };
 const bad = (m) => { results.push('FAIL: ' + m); console.error('FAIL: ' + m); };
@@ -93,7 +86,7 @@ async function launchBrowser() {
 }
 
 async function join(page, profile) {
-  await page.goto(FORCE_RELAY ? `${MATCH}?relay=1` : MATCH, { waitUntil: 'load', timeout: 20000 });
+  await page.goto(MATCH, { waitUntil: 'load', timeout: 20000 });
   await page.waitForSelector('#username', { timeout: 10000 });
   await page.type('#username', profile.username);
   await page.select('#age', String(profile.age));
@@ -220,19 +213,16 @@ async function main() {
     assert(Boolean(remoteA), `A receives remote video frames ${JSON.stringify(vA)}`);
     assert(Boolean(remoteB), `B receives remote video frames ${JSON.stringify(vB)}`);
 
-    // Path readout (Local network / Direct P2P vs TURN relay) from getStats()
+    // Path readout (Local network / Direct P2P) from getStats()
     let pathA = null;
     for (let i = 0; i < 8; i++) {
       pathA = await pageA.evaluate(
-        () => (document.body.innerText.match(/Local network|Direct P2P|TURN relay/) || [])[0] || null,
+        () => (document.body.innerText.match(/Local network|Direct P2P/) || [])[0] || null,
       );
       if (pathA) break;
       await sleep(1000);
     }
     assert(Boolean(pathA), `network path readout shown (${pathA})`);
-    if (FORCE_RELAY) {
-      assert(pathA === 'TURN relay', `media is carried by the TURN relay (${pathA})`);
-    }
 
     // ── 4. Controls: mute mic ────────────────────────────────────────────────
     await pageA.$$eval('footer button', (btns) => {
@@ -420,13 +410,19 @@ async function main() {
     const bAgain = await waitForText(pageB, 'End call', 25000);
     assert(aAgain && bAgain, 'both sides are matched again after Next');
 
+    // A new room means a new peer connection: wait for it to actually connect
+    // before asserting the stats HUD, not just for the call screen to render.
+    const aAgainConnected = await waitForText(pageA, 'Connected', 30000);
+    const bAgainConnected = await waitForText(pageB, 'Connected', 30000);
+    assert(aAgainConnected && bAgainConnected, 'both sides connect after re-match');
+
     // The stats HUD must come back on the new peer connection too.
     let pathA2 = null;
     let pathB2 = null;
     for (let i = 0; i < 25; i++) {
       const readPath = (page) =>
         page.evaluate(
-          () => (document.body.innerText.match(/Local network|Direct P2P|TURN relay/) || [])[0] || null,
+          () => (document.body.innerText.match(/Local network|Direct P2P/) || [])[0] || null,
         );
       pathA2 = await readPath(pageA);
       pathB2 = await readPath(pageB);
@@ -455,8 +451,8 @@ async function main() {
       );
       assert(
         (serverStats.calls?.paths?.unknown ?? 0) +
-          (serverStats.calls?.paths?.relay ?? 0) +
           (serverStats.calls?.paths?.srflx ?? 0) +
+          (serverStats.calls?.paths?.prflx ?? 0) +
           (serverStats.calls?.paths?.host ?? 0) >=
           1,
         `telemetry recorded media paths (${JSON.stringify(serverStats.calls?.paths)})`,
@@ -465,17 +461,6 @@ async function main() {
         .filter(([, n]) => n > 0)
         .map(([k]) => k);
       assert(sources.length >= 1, `telemetry recorded the ICE source (${sources.join(', ')})`);
-      if (FORCE_RELAY) {
-        // Only meaningful in relay mode: without TURN configured this is false.
-        assert(
-          serverStats.ice?.turnConfigured === true,
-          `server reports TURN configured (${JSON.stringify(serverStats.ice?.turnHosts)})`,
-        );
-        assert(
-          (serverStats.calls?.paths?.relay ?? 0) >= 1,
-          `telemetry attributed media to the relay (${JSON.stringify(serverStats.calls?.paths)})`,
-        );
-      }
     } else {
       bad('could not read /api/stats');
     }
@@ -516,7 +501,7 @@ async function main() {
     pageC.on('pageerror', (e) => consoleErrors.push('C pageerror: ' + e.message));
 
     const accName = `e2e_${Date.now().toString(36)}`;
-    await pageC.goto(FORCE_RELAY ? `${MATCH}?relay=1` : MATCH, { waitUntil: 'load', timeout: 20000 });
+    await pageC.goto(MATCH, { waitUntil: 'load', timeout: 20000 });
     await pageC.waitForSelector('#username', { timeout: 10000 });
     await pageC.type('#username', accName);
     await pageC.type('#password', 'e2e-password-123');

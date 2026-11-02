@@ -4,7 +4,7 @@
 #   podman run -p 4000:4000 --env-file prod.env matchup-server
 #
 # The image ships NO config: no .env, no database, no secrets. The platform
-# (Koyeb, Render, a VPS) injects PORT, CORS_ORIGIN, MARIADB_*, TURN_*.
+# (Koyeb, Render, a VPS) injects PORT, CORS_ORIGIN and MARIADB_*.
 FROM node:24-alpine
 
 WORKDIR /app

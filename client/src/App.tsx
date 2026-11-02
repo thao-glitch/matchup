@@ -19,6 +19,7 @@ import type {
   MatchInfo,
   Profile,
   ShareMeta,
+  SignalMessage,
   StampInfo,
   WaitingStatus,
 } from './types';
@@ -90,6 +91,35 @@ export default function App() {
   // Socket handlers are registered once, so they read the live phase through a
   // ref instead of capturing a stale closure.
   const phaseRef = useRef<Phase>('lobby');
+  /**
+   * SDP/ICE is delivered on the signaling socket, but the listener lives in
+   * <VideoChat>. A fast initiator can send its offer between `match:found` and
+   * that component mounting, which loses the first offer and leaves the call
+   * stuck on "Connecting". App buffers signals for the active room and hands
+   * them to the component the moment it registers.
+   */
+  const signalHandlerRef = useRef<{
+    roomId: string;
+    handler: (msg: SignalMessage) => void;
+  } | null>(null);
+  const signalBufferRef = useRef<Map<string, SignalMessage[]>>(new Map());
+
+  const registerSignalHandler = useCallback(
+    (roomId: string, handler: (msg: SignalMessage) => void) => {
+      signalHandlerRef.current = { roomId, handler };
+      // Only the current room matters; drop buffers from finished calls.
+      const pending = signalBufferRef.current.get(roomId) ?? [];
+      signalBufferRef.current.clear();
+      for (const msg of pending) handler(msg);
+      return () => {
+        if (signalHandlerRef.current?.handler === handler) {
+          signalHandlerRef.current = null;
+        }
+        signalBufferRef.current.delete(roomId);
+      };
+    },
+    [],
+  );
 
   useEffect(() => {
     phaseRef.current = phase;
@@ -188,6 +218,22 @@ export default function App() {
     const onWaiting = (status: WaitingStatus) => setPresence(status);
     const onPresence = (status: WaitingStatus) => setPresence(status);
 
+    const onSignal = (msg: SignalMessage) => {
+      if (!msg || typeof msg !== 'object' || typeof msg.roomId !== 'string') return;
+      const active = signalHandlerRef.current;
+      if (active && active.roomId === msg.roomId) {
+        active.handler(msg);
+        return;
+      }
+      // No component is listening yet — hold the message for the active room.
+      const list = signalBufferRef.current.get(msg.roomId) ?? [];
+      list.push(msg);
+      // A room only needs the first handful of SDP/ICE messages to connect;
+      // cap the buffer so a stale room cannot grow without bound.
+      if (list.length > 100) list.shift();
+      signalBufferRef.current.set(msg.roomId, list);
+    };
+
     const onPeerLeft = () => {
       // Ignore stale notifications that arrive after we already hung up.
       if (phaseRef.current !== 'chat') return;
@@ -228,6 +274,7 @@ export default function App() {
     s.on('presence', onPresence);
     s.on('peer:left', onPeerLeft);
     s.on('server:error', onServerError);
+    s.on('signal:data', onSignal);
     s.on('connect', onConnect);
     s.on('connect_error', onConnectError);
     s.on('disconnect', onDisconnect);
@@ -244,6 +291,7 @@ export default function App() {
       s.off('presence', onPresence);
       s.off('peer:left', onPeerLeft);
       s.off('server:error', onServerError);
+      s.off('signal:data', onSignal);
       s.off('connect', onConnect);
       s.off('connect_error', onConnectError);
       s.off('disconnect', onDisconnect);
@@ -479,6 +527,7 @@ export default function App() {
           match={match}
           localStream={localStream}
           socket={socket}
+          registerSignal={registerSignalHandler}
           onEndCall={endCall}
           onNext={nextMatch}
           onConnected={handleCallConnected}

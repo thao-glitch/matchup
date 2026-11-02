@@ -78,9 +78,8 @@ export interface CallStats {
   reports: number;
   dropped: number;
   outcomes: { connected: number; failed: number; successRate: number | null };
-  paths: { host: number; srflx: number; prflx: number; relay: number; unknown: number };
-  relayShare: number | null;
-  iceSources: { twilio: number; 'rest-secret': number; 'static-turn': number; 'stun-only': number; unknown: number };
+  paths: { host: number; srflx: number; prflx: number; unknown: number };
+  iceSources: { 'stun-only': number; unknown: number };
   rttMs: { samples: number; avg: number | null };
   durationMs: { samples: number; avg: number | null };
   recent: CallReport[];

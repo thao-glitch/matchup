@@ -143,8 +143,8 @@ export type AppError = {
   message: string;
 };
 
-/** `host` = LAN, `srflx` = direct P2P via STUN, `relay` = TURN (fallback). */
-export type PathType = 'host' | 'srflx' | 'prflx' | 'relay' | 'unknown';
+/** `host` = LAN, `srflx`/`prflx` = direct P2P via STUN. */
+export type PathType = 'host' | 'srflx' | 'prflx' | 'unknown';
 
 export interface NetworkStats {
   path: PathType;
@@ -153,8 +153,8 @@ export interface NetworkStats {
   protocol: string | null;
 }
 
-/** Where the ICE credentials came from (mirrors the server's `source`). */
-export type IceSource = 'twilio' | 'cloudflare' | 'rest-secret' | 'static-turn' | 'stun-only';
+/** Where the ICE credentials came from (this app serves `stun-only`). */
+export type IceSource = 'stun-only';
 
 /** The in-call playground channels relayed through `call:event`. */
 export type CallEventType = 'chat' | 'react' | 'spark' | 'duel';
@@ -181,7 +181,7 @@ export interface ChatMessage {
 export interface CallReport {
   roomId: string;
   outcome: 'connected' | 'failed';
-  /** Selected ICE candidate-pair type: `relay` means the TURN relay was used. */
+  /** Selected ICE candidate-pair type: host, srflx or prflx. */
   path?: PathType | null;
   rttMs?: number | null;
   durationMs?: number | null;

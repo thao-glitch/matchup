@@ -37,24 +37,9 @@ services:
       - key: MONGODB_URI
         sync: false
 
-      # ── WebRTC connectivity — TURN is required for symmetric NAT users ────
-      # Priority: Twilio → Cloudflare TURN → static secret → STUN-only.
-      # Preferred zero-ops: Cloudflare Realtime TURN (free tier) —
-      #   Realtime → TURN keys → create a key, paste both values below.
-      - key: CF_TURN_KEY_ID
-        sync: false
-      - key: CF_TURN_KEY_SECRET
-        sync: false
-      # Alternative A: coturn on your own VPS — TURN_URLS + TURN_SECRET.
-      - key: TURN_URLS
-        sync: false # turn:turn.example.com:3478?transport=udp,turns:…
-      - key: TURN_SECRET
-        sync: false # must equal coturn's static-auth-secret
-      # Alternative B: Twilio Network Traversal (SID + token).
-      - key: TWILIO_ACCOUNT_SID
-        sync: false
-      - key: TWILIO_AUTH_TOKEN
-        sync: false
+      # ── WebRTC connectivity — STUN only ───────────────────────────────────
+      # Video, audio and in-call chat travel directly between browsers. No TURN
+      # relay is configured or required.
 
       - key: PRESENCE_INTERVAL_MS
         value: "5000"

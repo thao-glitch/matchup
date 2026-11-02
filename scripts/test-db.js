@@ -24,7 +24,7 @@ const mysql = require(require.resolve('mysql2/promise', {
 
 const log = (...a) => console.log(...a);
 
-/** Minimal .env reader — keeps this script dependency-free (like test-turn). */
+/** Minimal .env reader — keeps this script dependency-free. */
 function readServerEnv() {
   const file = path.join(__dirname, '..', 'server', '.env');
   const fromFile = {};

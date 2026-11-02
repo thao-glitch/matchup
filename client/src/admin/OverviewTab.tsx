@@ -189,10 +189,10 @@ export default function OverviewTab() {
                   hint={`${data.calls.outcomes.connected} connected`}
                 />
                 <Stat
-                  label="Relay share"
-                  value={fmtPct(data.calls.relayShare)}
-                  tone={toneForRelay(data.calls.relayShare)}
-                  hint="TURN usage"
+                  label="Direct P2P"
+                  value={data.calls.paths.host + data.calls.paths.srflx + data.calls.paths.prflx}
+                  tone="ok"
+                  hint="host / STUN paths"
                 />
                 <Stat
                   label="Avg RTT"
@@ -471,10 +471,4 @@ function toneForRate(rate: number | null): 'ok' | 'danger' | 'warn' | undefined 
   if (rate >= 80) return 'ok';
   if (rate >= 50) return 'warn';
   return 'danger';
-}
-
-function toneForRelay(share: number | null): 'ok' | 'warn' | undefined {
-  // Relay traffic works but costs money; a rising share is worth noticing.
-  if (share === null) return undefined;
-  return share >= 30 ? 'warn' : undefined;
 }

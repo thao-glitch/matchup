@@ -22,7 +22,6 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 REPO="$PWD"
 SERVER_UNIT=matchup
-TURN_UNIT=matchup-turn
 ACTION=start
 case "${1:-start}" in
   start | stop | status) ACTION=$1 ;;
@@ -60,10 +59,6 @@ start)
   echo "  starting $SERVER_UNIT"
   systemctl --user start "$SERVER_UNIT"
 
-  # Optional: a local coturn relay, only when one is installed. Its absence is
-  # not fatal — ICE falls back to whatever `TURN_URLS` points at, and to STUN.
-  systemctl --user start "$TURN_UNIT" 2>/dev/null || echo "  (no local coturn relay — using the TURN server in the environment, if set)"
-
   echo -n "  waiting for the server"
   H=""
   for _ in $(seq 1 30); do H="$(health)"; [ -n "$H" ] && break; echo -n "."; sleep 1; done
@@ -81,7 +76,6 @@ start)
 
 stop)
   if have_um; then
-    systemctl --user stop "$TURN_UNIT" 2>/dev/null || true
     systemctl --user stop "$SERVER_UNIT" 2>/dev/null || true
   fi
   pids="$(port_holder)"; [ -n "$pids" ] && { echo "  killed stray server $pids"; kill $pids 2>/dev/null || true; }
@@ -92,9 +86,7 @@ status)
   if have_um; then
     sa="$(systemctl --user is-active "$SERVER_UNIT" 2>/dev/null || true)"
     se="$(systemctl --user is-enabled "$SERVER_UNIT" 2>/dev/null || true)"
-    ra="$(systemctl --user is-active "$TURN_UNIT" 2>/dev/null || true)"
     printf 'server : %-10s %s\n' "${sa:-?}" "${se:-?}"
-    printf 'turn   : %-10s %s\n' "${ra:-?}" "local relay (optional)"
   fi
   ma="$(systemctl is-active mariadb 2>/dev/null || true)"
   me="$(systemctl is-enabled mariadb 2>/dev/null || true)"

@@ -10,10 +10,10 @@ to configure — the browser talks to one origin for everything.
 | **App + API + admin** (this repo, one image) | **Koyeb** — free web service | free |
 | Database (accounts, passports, payments, settings) | **Aiven for MySQL** — free tier, no card | free |
 | Image registry | **Docker Hub** — free | free |
-| TURN relay (strict-NAT fallback) | **Cloudflare Realtime TURN** — free tier | free |
 
 > Media itself is **peer-to-peer over WebRTC** — video never touches your
 > server. The container only introduces people and relays a few KB of SDP/ICE.
+> There is no TURN relay to host or pay for.
 
 ---
 
@@ -87,7 +87,6 @@ it, and — if `KOYEB_TOKEN` is set — asks Koyeb to pick up the new image.
    | `CRON_SECRET` | authorizes the daily `/api/cron/media` lifecycle sweep |
    | `MEDIA_ORPHAN_GRACE_HOURS` / `MEDIA_RETENTION_DAYS` | *optional* — Blob orphan grace (24h) and legacy DB retention (30d) |
    | `CORS_ORIGIN` | *optional* — only needed if you later serve the client from a second origin |
-   | `CF_TURN_KEY_ID` / `CF_TURN_KEY_SECRET` | *optional* — step 4 |
 
 4. Health check: **HTTP, path `/health`**. Deploy.
 
@@ -100,18 +99,18 @@ curl -s https://<app>-<id>.koyeb.app/health
 
 `store:maria` proves the database is live and the schema was created for you.
 
-## 4. TURN relay — Cloudflare free tier (10 min, optional but recommended)
+## 4. Network connectivity (STUN only)
 
-Without TURN, roughly one user in ten (symmetric NAT, CGNAT, strict corporate
-Wi-Fi) hits "Unable to connect". Cloudflare issues short-lived relay credentials
-with no infrastructure of your own:
+Video, audio and the in-call chat travel directly between the two browsers.
+`GET /api/ice` serves a public STUN list; there is no TURN relay, no relay
+credentials, and no extra service to deploy. Calls that cannot build a direct
+path fail cleanly with **Unable to connect**, and the user can retry or switch
+networks. Confirm the mode with:
 
-1. **dash.cloudflare.com → Realtime → TURN → Create TURN key.**
-2. Copy the key id + secret into Koyeb, redeploy.
-3. Confirm: `curl -s https://<app>.koyeb.app/api/ice` reports
-   `"source":"cloudflare"` and `"turnConfigured":true`.
-
-*Leave it unset and the app still works STUN-only for ~90% of users.*
+```bash
+curl -s https://<app>-<id>.koyeb.app/health | jq .ice
+# { "source": "stun-only", "stunHosts": 6, "cachedUntil": null }
+```
 
 ## 5. First admin login (2 min)
 
@@ -171,8 +170,8 @@ this computer. Keep the local MariaDB for development —
 
 | Traffic | Setup | Monthly |
 | --- | --- | --- |
-| Free tiers (above) | Koyeb free instance + Aiven free + Cloudflare free TURN | **$0** |
-| Growth | **One VPS** (Hetzner/Contabo ~$5) runs the container + MariaDB + coturn, Caddy handles HTTPS | ~$5 |
+| Free tiers (above) | Koyeb free instance + Aiven free | **$0** |
+| Growth | **One VPS** (Hetzner/Contabo ~$5) runs the container + MariaDB, Caddy handles HTTPS | ~$5 |
 | Real scale | Koyeb/Render paid instance + Aiven paid DB | $10–30 |
 
 ### Alternatives

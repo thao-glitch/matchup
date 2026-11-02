@@ -42,6 +42,12 @@ interface Props {
   match: MatchInfo;
   localStream: MediaStream;
   socket: AppSocket;
+  /**
+   * App owns the socket-level `signal:data` listener so an offer that arrives
+   * between `match:found` and this component mounting is buffered instead of
+   * lost. Returns an unregister function.
+   */
+  registerSignal: (roomId: string, handler: (msg: SignalMessage) => void) => () => void;
   /** Hang up and stop on the post-call screen (Next / Stop matching). */
   onEndCall: () => void;
   /** Leave *this* partner and queue for someone new right away. */
@@ -77,13 +83,8 @@ const PATH_LABEL: Record<string, string> = {
   host: 'Local network',
   srflx: 'Direct P2P',
   prflx: 'Direct P2P',
-  relay: 'TURN relay',
   unknown: '…',
 };
-
-/** `?relay=1` pins ICE to TURN — used to prove the relay path really works. */
-const FORCE_RELAY =
-  typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('relay');
 
 /** Rock-paper-scissors duel state — identical on both screens by design. */
 interface DuelState {
@@ -138,6 +139,7 @@ export default function VideoChat({
   match,
   localStream,
   socket,
+  registerSignal,
   onEndCall,
   onNext,
   onConnected,
@@ -187,8 +189,8 @@ export default function VideoChat({
   const chatInputRef = useRef<HTMLInputElement>(null);
 
   // ── Call telemetry (`call:report`) ────────────────────────────────────────
-  // One row per call answers "P2P or TURN, and did it survive?" — the server
-  // aggregates them in `GET /api/stats` → `calls`.
+  // One row per call answers "did the direct connection work, and how did it
+  // perform?" — the server aggregates them in `GET /api/stats` → `calls`.
   const connectedAtRef = useRef<number | null>(null);
   const everConnectedRef = useRef(false);
   const pathReportedRef = useRef(false);
@@ -332,11 +334,12 @@ export default function VideoChat({
       void created.handleSignal(msg);
     };
 
-    socket.on('signal:data', handleSignal);
+    // App's socket listener either routes straight here or flushes what it
+    // buffered before this component mounted. Either way, no offer is lost.
+    const unregisterSignal = registerSignal(roomId, handleSignal);
 
     (async () => {
-      // STUN/TURN config is fetched (and cached) from the signaling server so
-      // TURN credentials never ship inside the JS bundle.
+      // STUN config is fetched (and cached) from the signaling server.
       const { iceServers, source } = await getIceConfig();
       if (cancelled) return;
       iceSourceRef.current = (source ?? 'unknown') as IceSource | 'unknown';
@@ -345,9 +348,6 @@ export default function VideoChat({
         initiator,
         localStream,
         iceServers,
-        // `?relay=1` pins ICE to TURN candidates only — proves the relay path
-        // end to end (used by the E2E relay test and for manual debugging).
-        iceTransportPolicy: FORCE_RELAY ? 'relay' : 'all',
         send: (payload) => socket.emit('signal:data', { ...payload, roomId }),
         onState: setCallState,
         onRemoteStream: setRemoteStream,
@@ -364,7 +364,7 @@ export default function VideoChat({
 
     return () => {
       cancelled = true;
-      socket.off('signal:data', handleSignal);
+      unregisterSignal();
       created?.destroy();
       peerRef.current = null;
       setRemoteStream(null);
@@ -373,7 +373,7 @@ export default function VideoChat({
       // Runs on hang-up, on retry, and on unmount.
       if (everConnectedRef.current) report('connected', true);
     };
-  }, [roomId, initiator, socket, localStream, attempt, report]);
+  }, [roomId, initiator, socket, localStream, attempt, report, registerSignal]);
 
   // ── Media elements ─────────────────────────────────────────────────────────
   useEffect(() => {
@@ -437,7 +437,7 @@ export default function VideoChat({
         lastStatsRef.current = next;
         setStats(next);
         // First row as soon as the selected candidate pair is known — this is
-        // what tells an operator whether TURN is actually carrying media.
+        // what tells an operator how the direct connection is performing.
         if (!pathReportedRef.current) {
           pathReportedRef.current = true;
           report('connected');
@@ -999,9 +999,9 @@ export default function VideoChat({
               </div>
               <h2 className="text-lg font-semibold text-ink">Unable to connect</h2>
               <p className="mt-2 text-sm leading-relaxed text-muted">
-                We couldn’t build a media path to {peer.username}. This is usually a strict
-                firewall, symmetric NAT, or a network that blocks UDP — a TURN relay covers
-                most of these cases.
+                We couldn’t build a direct media path to {peer.username}. This is usually a
+                strict firewall, symmetric NAT, or a network that blocks UDP. Try another
+                network — switching between Wi-Fi and mobile data often helps.
               </p>
               <div className="mt-5 flex flex-col gap-2 sm:flex-row sm:justify-center">
                 <button type="button" onClick={retry} className="btn btn-primary">
