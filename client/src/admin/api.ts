@@ -150,6 +150,11 @@ export interface DatabaseData {
   totalBytes: number;
   dataBytes: number;
   indexBytes: number;
+  /** Disk budget used for the usage bar. Display-only; see MARIADB_STORAGE_LIMIT_MB. */
+  capacityBytes: number;
+  capacityLimitMb: number;
+  usedPct: number;
+  headroomBytes: number;
   tables: DatabaseTable[];
   connections: { current: number; running: number; max: number };
   pool: PoolStats;

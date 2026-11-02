@@ -17,6 +17,7 @@
     "test:auth": "node scripts/test-auth.js",
     "test:admin": "node scripts/test-admin.js",
     "test:platform": "node scripts/test-platform.js",
+    "db:copy": "node scripts/db-copy.js",
     "seed": "node scripts/seed-content.js",
     "test:ui": "node scripts/test-ui.js",
     "test:e2e": "npm --prefix scripts install --no-audit --no-fund && node scripts/e2e.js"

@@ -83,6 +83,7 @@ it, and — if `KOYEB_TOKEN` is set — asks Koyeb to pick up the new image.
    | `ADMIN_PASSWORD` | your dashboard password (10+ chars) |
    | `BLOB_READ_WRITE_TOKEN` | Vercel Blob read/write token; keeps uploads out of MariaDB. Connect a Blob store in Vercel → Storage → Connect to Project. |
    | `MARIADB_POOL_SIZE` | *optional* — connections per instance (default `5`; keep pool × warm instances below `max_connections`) |
+   | `MARIADB_STORAGE_LIMIT_MB` | *optional* — disk budget shown in `/admin` (default `1024`; display-only, raise it when the plan changes) |
    | `MARIADB_READ_HOST` / `MARIADB_READ_PORT` / `MARIADB_READ_USER` / `MARIADB_READ_PASSWORD` | *optional* — read replica; public feeds use it and fall back to the primary if it is down |
    | `CRON_SECRET` | authorizes the daily `/api/cron/media` lifecycle sweep |
    | `MEDIA_ORPHAN_GRACE_HOURS` / `MEDIA_RETENTION_DAYS` | *optional* — Blob orphan grace (24h) and legacy DB retention (30d) |
@@ -155,11 +156,19 @@ If this PC's MariaDB already holds accounts people created, bring them along:
 mariadb-dump --no-tablespaces --single-transaction matchup > matchup-dump.sql
 
 mariadb --host AIVEN_HOST --port AIVEN_PORT --user avnadmin \
-        --password 'AVN_PASSWORD' matchup < matchup-dump.sql
+        --password 'AVN_PASSWORD' --ssl matchup < matchup-dump.sql
 ```
 
-(Add `--ssl` if the client refuses the connection. Skip it entirely to start
-fresh — the schema re-creates itself.)
+(The `--ssl` flag is for Aiven; drop it for a local target. Skip this section
+entirely to start fresh — the schema re-creates itself.)
+
+The Aiven free MySQL plan includes **1 GB of storage**. That is enough for a
+long time because post media is stored in Vercel Blob, not in the database.
+The admin **Database** card shows usage against `MARIADB_STORAGE_LIMIT_MB`
+(default 1024). When you need more room, upgrade the Aiven plan in place (same
+host and credentials), or move to a new service with `npm run db:copy` — see
+[docs/SCALING.md](docs/SCALING.md) §6. Do not create a second database for the
+same users; accounts, sessions, wallets and charges must stay in one primary.
 
 ## 8. Retire the PC stack (when you're ready)
 

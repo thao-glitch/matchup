@@ -44,6 +44,11 @@ const QUEUE_LIMIT = envInt(process.env.MARIADB_QUEUE_LIMIT, 0, 0, 10000);
 const IDLE_TIMEOUT_MS = envInt(process.env.MARIADB_IDLE_TIMEOUT_MS, 30000, 1000, 600000);
 const MAX_IDLE = envInt(process.env.MARIADB_MAX_IDLE, 10000, 0, 600000);
 
+// Hosted free MySQL/MariaDB tiers commonly cap the primary at 1 GB. The admin
+// dashboard reports usage against this budget. Raise the value when the plan
+// grows; it is display-only and never limits writes.
+const STORAGE_LIMIT_MB = envInt(process.env.MARIADB_STORAGE_LIMIT_MB, 1024, 64, 1048576);
+
 /** Database names get interpolated into DDL — identifier-safe characters only. */
 const SAFE_DB_NAME = /^[A-Za-z0-9_]+$/;
 
@@ -506,6 +511,17 @@ const PURGE_AUDIT = `
   DELETE FROM audit_log WHERE created_at < NOW() - INTERVAL 90 DAY
 `;
 
+/** Admin sessions expire after 12h; expired rows are dead weight. */
+const PURGE_ADMIN_SESSIONS = `
+  DELETE FROM admin_sessions WHERE expires_at < NOW()
+`;
+
+/** Old call history is only useful for a short rejoin window. */
+const PAIRLOG_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+const PURGE_PAIRLOG = `
+  DELETE FROM rt_pairlog WHERE ended_at < ?
+`;
+
 /** Expired subscriptions stop granting access; the row stays as history. */
 const PURGE_SUBS = `
   UPDATE subscriptions SET status = 'expired'
@@ -701,6 +717,10 @@ async function applySchema() {
   await pool.query(PURGE_SESSIONS).catch(() => undefined);
   await pool.query(PURGE_AUDIT).catch(() => undefined);
   await pool.query(PURGE_SUBS).catch(() => undefined);
+  await pool.query(PURGE_ADMIN_SESSIONS).catch(() => undefined);
+  await pool
+    .query(PURGE_PAIRLOG, [Date.now() - PAIRLOG_RETENTION_MS])
+    .catch(() => undefined);
 }
 
 /**
@@ -827,8 +847,17 @@ async function init(env = process.env) {
       ?.query(PURGE_SESSIONS)
       .catch((err) => console.error('[store] session purge failed:', err.message));
     pool
+      ?.query(PURGE_AUDIT)
+      .catch((err) => console.error('[store] audit purge failed:', err.message));
+    pool
       ?.query(PURGE_SUBS)
       .catch((err) => console.error('[store] subscription purge failed:', err.message));
+    pool
+      ?.query(PURGE_ADMIN_SESSIONS)
+      .catch((err) => console.error('[store] admin session purge failed:', err.message));
+    pool
+      ?.query(PURGE_PAIRLOG, [Date.now() - PAIRLOG_RETENTION_MS])
+      .catch((err) => console.error('[store] pairlog purge failed:', err.message));
   }, PURGE_INTERVAL_MS);
   purgeTimer.unref?.();
 
@@ -1475,12 +1504,22 @@ async function dbStats() {
     };
   });
 
+  const totalBytes = mapped.reduce((sum, row) => sum + row.totalBytes, 0);
+  const dataBytes = mapped.reduce((sum, row) => sum + row.dataBytes, 0);
+  const indexBytes = mapped.reduce((sum, row) => sum + row.indexBytes, 0);
+  const capacityBytes = STORAGE_LIMIT_MB * 1024 * 1024;
+  const usedPct = capacityBytes > 0 ? (totalBytes / capacityBytes) * 100 : 0;
+
   return {
     version: versionRow?.version || '',
     database: versionRow?.db || '',
-    totalBytes: mapped.reduce((sum, row) => sum + row.totalBytes, 0),
-    dataBytes: mapped.reduce((sum, row) => sum + row.dataBytes, 0),
-    indexBytes: mapped.reduce((sum, row) => sum + row.indexBytes, 0),
+    totalBytes,
+    dataBytes,
+    indexBytes,
+    capacityBytes,
+    capacityLimitMb: STORAGE_LIMIT_MB,
+    usedPct: Number(usedPct.toFixed(2)),
+    headroomBytes: Math.max(0, capacityBytes - totalBytes),
     tables: mapped,
     connections: {
       current: Number(status.get('Threads_connected')) || 0,

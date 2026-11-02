@@ -266,6 +266,33 @@ export default function OverviewTab() {
                 />
               </div>
 
+              <div className="mt-4">
+                <div className="flex flex-wrap items-center justify-between gap-1 text-[11px] text-muted">
+                  <span>Storage used against the configured plan</span>
+                  <span className="tabular-nums">
+                    {formatBytes(data.database.totalBytes)} of{' '}
+                    {formatBytes(data.database.capacityBytes ?? 0)} ({data.database.usedPct ?? 0}%)
+                  </span>
+                </div>
+                <div className="mt-1 h-2 overflow-hidden rounded-full bg-white/10">
+                  <div
+                    className={
+                      (data.database.usedPct ?? 0) >= 90
+                        ? 'h-full rounded-full bg-danger'
+                        : (data.database.usedPct ?? 0) >= 75
+                          ? 'h-full rounded-full bg-warn'
+                          : 'h-full rounded-full bg-ok'
+                    }
+                    style={{ width: `${Math.min(100, data.database.usedPct ?? 0)}%` }}
+                  />
+                </div>
+                <p className="mt-1 text-[11px] text-muted">
+                  {formatBytes(data.database.headroomBytes ?? 0)} free before the{' '}
+                  {data.database.capacityLimitMb ?? 1024} MB budget · raise{' '}
+                  <span className="font-mono">MARIADB_STORAGE_LIMIT_MB</span> when the plan changes
+                </p>
+              </div>
+
               <div className="mt-3 flex flex-wrap items-center gap-2">
                 <button
                   type="button"

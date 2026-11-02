@@ -145,7 +145,58 @@ Dry run reports what would be deleted without deleting anything.
 - **Money:** keep the ledger on a primary and make settlement idempotent; never
   split a charge across shards.
 
-## 6. Operating checklist
+## 6. Storage capacity and moving to a bigger primary
+
+Matchup already uses one central, data-only primary. Media lives in Vercel
+Blob, so the database holds accounts, posts, comments, follows, subscriptions,
+charges, wallets, sessions and call-queue rows — not image or video bytes.
+
+The admin **Database** card shows usage against `MARIADB_STORAGE_LIMIT_MB`
+(default `1024`, the usual free managed MySQL/MariaDB tier). It is display-only;
+the app never blocks writes at that number. Aiven's free MySQL plan is 1 GB;
+the paid Developer/Hobbyist plans start at 8 GB.
+
+Do **not** run a second database for the same users: accounts, sessions,
+follows, subscriptions, wallets and charges would diverge, and logins or
+payments would break. Grow the primary instead.
+
+### Option A — upgrade the existing service (no copy)
+
+Aiven → service → **Overview** → **Upgrade plan**. Host, port, user, password
+and database name stay the same, so there is no redeploy and no data copy.
+Raise `MARIADB_STORAGE_LIMIT_MB` afterwards so the dashboard bar matches the
+new plan.
+
+### Option B — move to a new primary
+
+1. Create the new MySQL/MariaDB service and note its host, port, user,
+   password and database name.
+2. Dry-run the copy from this PC:
+
+   ```bash
+   SOURCE_MARIADB_HOST=... SOURCE_MARIADB_PORT=... \
+   SOURCE_MARIADB_USER=... SOURCE_MARIADB_PASSWORD=... SOURCE_MARIADB_DATABASE=... \
+   SOURCE_MARIADB_SSL=true \
+   TARGET_MARIADB_HOST=... TARGET_MARIADB_PORT=... \
+   TARGET_MARIADB_USER=... TARGET_MARIADB_PASSWORD=... TARGET_MARIADB_DATABASE=... \
+   TARGET_MARIADB_SSL=true \
+   npm run db:copy -- --dry-run
+   ```
+
+3. Run it for real (`npm run db:copy`). It reads one consistent snapshot,
+   copies every table in batches, and verifies row counts. Add `--force` only
+   when the target already has rows from an earlier attempt.
+4. Point the production environment at the target (`MARIADB_*`), redeploy, and
+   confirm `/health` reports `store: "maria"` and the admin Database card shows
+   the new plan size.
+5. Keep the old service for rollback for at least a week. Stop writing to it,
+   and never point different app instances at different primaries.
+
+The copy runs while the source is online, but rows written after its snapshot
+are not included. For a busy production switch, pause sign-ups and payments for
+the few minutes of the copy, or re-run it immediately before switching.
+
+## 7. Operating checklist
 
 ```bash
 # Health and media backend

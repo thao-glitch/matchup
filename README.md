@@ -196,6 +196,7 @@ Open **two tabs** on `http://localhost:5173`, fill in two complementary profiles
 | `MEDIA_TOKEN_SECRET` | no       | Key for the signed `?t=` claims on paid media URLs. Unset ⇒ a random per-boot key (fine for one instance; set it if you scale past one so links survive restarts/instances) |
 | `MEDIA_TOKEN_TTL_MS` | no       | How long a paid-media claim stays valid (default `3600000` = 1h)     |
 | `MARIADB_POOL_SIZE` | no | Connections per serverless instance (default `5`; keep `pool × warm instances` below `max_connections`) |
+| `MARIADB_STORAGE_LIMIT_MB` | no | Disk budget shown in `/admin` → Database (default `1024`; display-only, raise it when the plan changes) |
 | `MARIADB_QUEUE_LIMIT` | no | Queries allowed to wait for a pooled connection (default `0` = unbounded queue) |
 | `MARIADB_IDLE_TIMEOUT_MS` / `MARIADB_MAX_IDLE` | no | Pool idle eviction (defaults `30000` / `10000`) |
 | `MARIADB_READ_HOST` / `MARIADB_READ_PORT` | no | Optional read replica. When set, public feeds and anonymous creator cards use it; auth, money, entitlement and signed-in viewer state stay on the primary. Falls back automatically if the replica is down. |
@@ -717,6 +718,12 @@ with media in Vercel Blob. The practical controls are:
 
 - **Connection pool:** `MARIADB_POOL_SIZE` keeps `pool × warm instances` below
   the database's `max_connections`.
+- **Storage capacity:** the admin Database card compares actual usage with
+  `MARIADB_STORAGE_LIMIT_MB` (default 1 GB, matching common free tiers). The
+  database is data-only — media is in Blob — so text data lasts a long time.
+  Upgrade the plan in place, or move to a larger primary with `npm run db:copy`
+  ([docs/SCALING.md](docs/SCALING.md) §6). Never split the same users across two
+  primaries.
 - **Read replica:** set `MARIADB_READ_HOST`; public feeds and anonymous creator
   cards use it, while auth, money, entitlement and signed-in viewer state stay
   on the primary.
