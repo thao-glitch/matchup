@@ -21,7 +21,7 @@ HTTP channel as signaling, and the server forwards them to the partner.
 | Media      | MediaRecorder → app-server HTTP relay (no STUN/TURN)           |
 | Deployment | **One container** — app + API + admin on Koyeb/Render/VPS ([DEPLOY.md](DEPLOY.md)) |
 
-**Verified end-to-end**: 44/44 browser E2E checks (match → ICE → both-way video →
+**Verified end-to-end**: 44/44 browser E2E checks (match → relay → both-way video →
 mute/camera → chat → Spark → rock-paper-scissors duel → hang-up → *Next* →
 re-match → share card → live country board → the Passport → accounts →
 telemetry), 28/28 account checks, 40/40 platform checks (commission split,
@@ -88,9 +88,9 @@ matchup/
 │       │   └── icons.tsx             # inline SVG icons (no icon dependency)
 │       ├── hooks/                    # (reserved)
 │       └── lib/
-│           ├── signaling.ts          # typed Socket.io client + event contract
-│           ├── rooms.ts              # room socket client (mesh group calls)
-│           ├── peer.ts               # RTCPeerConnection wrapper (the core)
+│           ├── signaling.ts          # typed HTTP long-poll client + event contract
+│           ├── rooms.ts              # room signaling client (group calls)
+│           ├── peer.ts               # media transport (app-server relay)
 │           ├── iceServers.ts         # media transport config (relay mode)
 │           ├── auth.ts               # /api/auth client + bearer token in localStorage
 │           ├── social.ts             # /api/posts, /api/wallet, /api/rooms client
@@ -104,7 +104,7 @@ matchup/
 │           └── countries.ts          # locale-aware country list
 │
 ├── server/                          # Signaling server (deployed to Render)
-│   ├── server.js                    # Express + Socket.io + HTTP + auth routes
+│   ├── server.js                    # Express + HTTP signaling + media relay + auth
 │   ├── render.yaml                  # Render blueprint (infra as code)
 │   ├── .env.example
 │   └── src/
@@ -211,7 +211,7 @@ Open **two tabs** on `http://localhost:5173`, fill in two complementary profiles
 | Variable           | Purpose                                                                  |
 | ------------------ | ------------------------------------------------------------------------ |
 | `VITE_SIGNALING_URL` | Absolute URL of the signaling server. **Empty ⇒ same origin** (dev proxy) |
-| `VITE_ICE_URL`     | Override the ICE config endpoint (defaults to `<VITE_SIGNALING_URL>/api/ice`) |
+| `VITE_ICE_URL`     | Diagnostic only; relay mode ignores it and `/api/ice` returns an empty list |
 
 ---
 
@@ -233,8 +233,9 @@ Open **two tabs** on `http://localhost:5173`, fill in two complementary profiles
 4. If nothing matches, the user is queued and receives `match:waiting` with live
    `looking` / `online` counters (pushed every few seconds while queued).
 
-A room id is generated and **one side is flagged `initiator: true`** — that side
-creates the SDP offer, which is what prevents offer/answer glare.
+A room id is generated and **one side is flagged `initiator: true`**. The relay
+does not need an offer/answer handshake; the flag is retained for compatibility
+with the optional WebRTC path.
 
 ### 4.2 Signaling contract
 
@@ -244,7 +245,7 @@ Defined once in `client/src/lib/signaling.ts`, mirrored in `server/src/protocol.
 | --------- | ---------------- | ----------------------------------------- |
 | C → S     | `queue:join`     | `{ profile }`                             |
 | C → S     | `queue:leave`    | —                                         |
-| C → S     | `signal:data`    | `{ roomId, kind: offer\|answer\|candidate, payload }` |
+| C → S     | `signal:data`    | `{ roomId, kind: offer\|answer\|candidate\|media, payload }` |
 | C → S     | `call:end`       | —                                         |
 | S → C     | `match:found`    | `{ roomId, peer, initiator }`             |
 | S → C     | `match:waiting`  | `{ looking, online }`                     |
@@ -254,24 +255,25 @@ Defined once in `client/src/lib/signaling.ts`, mirrored in `server/src/protocol.
 | S → C     | `server:error`   | `{ code, message }`                       |
 
 The relay only forwards messages whose `roomId` matches the sender's room, is rate
-limited (80 msgs/s/socket) and capped at 1 MB per packet.
+limited (80 msgs/s/session) and media slices are capped at 90 KB of base64.
 
 ### 4.3 Media transport (`client/src/lib/peer.ts`)
 
-A small, dependency-free `RTCPeerConnection` wrapper instead of `simple-peer`
-(unmaintained, hides exactly the state we must surface). It implements:
+The default and only configured transport is the app-server relay:
 
-* **Perfect negotiation** — the W3C "polite peer" pattern, so simultaneous offers
-  resolve instead of deadlocking.
-* **Candidate buffering** — ICE candidates that arrive before the remote
-  description used to be dropped ("connects 1 time in 3" on high-RTT links).
-* **ICE restarts** — Wi-Fi↔LTE handoffs or `disconnected` blips recover
-  transparently (max 2 restarts) before giving up.
-* **Watchdog** — ICE can hang forever in `checking`; after 20 s we restart, after
-  2 more attempts we surface **"Unable to connect"** with *Try again* / *Find
-  someone else*.
+* **No handshake** — both sides start a `MediaRecorder` as soon as the match is
+  created and send slices over the signaling channel; there is no SDP/ICE
+  exchange and no NAT traversal.
+* **Format fallback** — the recorder picks the first supported format from WebM
+  VP8/VP9 and MP4 H.264; the receiver creates the matching `MediaSource`.
+* **Watchdog** — if no remote slice arrives within 20 s, the call fails cleanly
+  with **"Unable to connect"** and *Try again* / *Find someone else*.
 * **Path readout** — `getStats()` shows `Server relay` in the call header, so
   the UI is explicit about the transport in use.
+
+The file also keeps a `WebRtcPeer` implementation for a future direct/LAN mode,
+but `getIceConfig()` returns `iceServers: []`, so `Peer` always selects the
+relay. No STUN or TURN URL is configured anywhere.
 
 Connection states → UI: `connecting` · `connected` · `reconnecting` · `failed`.
 
@@ -298,8 +300,8 @@ MediaRecorder → ~800 ms encoded slices → POST /api/rt/emit → partner inbox
 * If the relay cannot start, the call fails cleanly with **"Unable to
   connect"**. Chat still works because it uses the same signaling channel.
 
-**Call telemetry.** Every call sends one `call:report` (selected ICE candidate
-pair, RTT, duration). They aggregate in `GET /api/stats` → `calls`:
+**Call telemetry.** Every call sends one `call:report` (selected media transport,
+RTT when available, duration). They aggregate in `GET /api/stats` → `calls`:
 
 ```jsonc
 {
@@ -426,7 +428,7 @@ Transport: a `call:event` relay channel next to `signal:data`
 (`protocol.js` → `matchmaker.relayCallEvent`) with a server-side **whitelist**
 (chat/react/spark/duel payloads rebuilt field-by-field, 500-char chat cap,
 fixed emoji set), spoofed-room drops, and its own 15/s rate limit so the fun
-channel can never crowd out the SDP relay. No server game state: everything
+channel can never crowd out the media/signaling relay. No server game state: everything
 shared is derivable from the same events both sides already see.
 
 ### 4.8 Admin dashboard & M-PESA payments
@@ -459,7 +461,7 @@ and `GET /api/config` hands the switches to the lobby.
 ## 5. Deployment
 
 > **Run it fully independently → [DEPLOY.md](DEPLOY.md)** — one container (app +
-> API + WebSocket + `/admin`) on free Koyeb and free Aiven MySQL. No credit
+> API + media relay + `/admin`) on free Koyeb and free Aiven MySQL. No credit
 > card, no GitHub, no separate frontend host, and your PC can be switched off.
 > The sections below cover the classic paths (Render blueprint, local MariaDB).
 >
@@ -483,8 +485,8 @@ and `GET /api/config` hands the switches to the lobby.
 4. Copy the service URL, e.g. `https://matchup-signaling.onrender.com`.
 5. Smoke-test: `curl https://…/health` → `{"status":"ok",…}`.
 
-> Render/Railway terminate TLS and proxy WebSockets out of the box — Socket.io
-> needs no extra configuration on a single instance.
+> Render/Railway terminate TLS and proxy long-poll HTTP out of the box — the
+> relay needs no extra configuration on a single instance.
 
 ### 5.2 Frontend → Vercel
 
@@ -502,7 +504,7 @@ and `GET /api/config` hands the switches to the lobby.
 4. Deploy. `client/vercel.json` already handles the SPA rewrite and long-lived
    asset caching.
 5. Back in Render, set `CORS_ORIGIN` to the final Vercel URL (comma-separate
-   multiple preview URLs) — otherwise Socket.io will reject the connection.
+   multiple preview URLs) — otherwise the browser's API calls are rejected by CORS.
 
 **Order matters**: deploy the backend first, then the frontend, then update
 `CORS_ORIGIN`. Redeploying the frontend after that picks up the env var.
@@ -527,8 +529,8 @@ exact origin is what you want in production.
 ### 5.3 Standalone (single container, single URL) — the default
 
 The root `Dockerfile` builds the client **inside** the image and copies the
-bundle next to the server, so one process serves the app, the API, the
-WebSocket and `/admin` from one origin:
+bundle next to the server, so one process serves the app, the API, the media
+relay and `/admin` from one origin:
 
 ```bash
 docker build -t matchup .          # ~1 min warm, ~2 cold
@@ -536,8 +538,8 @@ docker run -p 4000:4000 --env-file prod.env matchup
 open http://localhost:4000        # the whole app
 ```
 
-`VITE_SIGNALING_URL` is left empty on purpose: the bundle calls `/api`,
-`/api/ice` and `/socket.io` on its own origin. Deploy the same image with
+`VITE_SIGNALING_URL` is left empty on purpose: the bundle calls `/api` and
+`/api/ice` on its own origin. Deploy the same image with
 `./scripts/deploy.sh` — [DEPLOY.md](DEPLOY.md) walks through Koyeb end to end.
 If you'd rather build the client on the host (`cd client && npm run build`),
 the server still auto-detects `client/dist` and serves the SPA exactly as before.
@@ -567,8 +569,8 @@ everything under `/var/lib/mysql` and grows with the app, while the frontend is
 still shipped to Vercel.
 
 **Why the signaling server also has to run here:** Vercel serves static files
-and short-lived functions — Socket.io needs a long-lived process — and a
-database on this machine is only reachable from this network. So:
+and short-lived functions cannot hold the MariaDB connection, and a database
+on this machine is only reachable from this network. So:
 
 ```
 browser ──▶ Vercel (static client)
@@ -577,7 +579,7 @@ browser ──▶ Vercel (static client)
         free tunnel (cloudflared / ngrok)   ← public HTTPS, outbound only
                  │
                  ▼
-        this PC, localhost:4000  (Express + Socket.io)
+        this PC, localhost:4000  (Express + HTTP relay)
                  │
                  ▼
         MariaDB 127.0.0.1:3306  →  /var/lib/mysql   ← your data, your disk
@@ -647,7 +649,7 @@ cloudflared tunnel --url http://localhost:4000     # prints an https://…tryclo
   Variables) and redeploy the client — `VITE_*` values are baked in at build
   time, so the var must exist *before* the build.
 * Set `CORS_ORIGIN=https://your-app.vercel.app` in `server/.env`, then restart
-  the server — otherwise Socket.io rejects the browser.
+  the server — otherwise CORS rejects the browser.
 
 **5. Keep it running.** MariaDB starts at boot (`systemctl enable` above). For
 the app server, add a **user** service. It deliberately *waits for MariaDB*:
@@ -731,7 +733,7 @@ The memory store remains only the local/dev fallback.
 ## 7. Testing
 
 ```bash
-# Signaling: 16 checks — queue, match rule, SDP relay, spoofed-room drop,
+# Signaling: 16 checks — queue, match rule, signaling relay, spoofed-room drop,
 # in-call `call:event` relay + whitelist, hang-up/disconnect notifications,
 # re-match
 npm run test:signaling
@@ -802,10 +804,10 @@ node scripts/e2e.js
 | --- | --- |
 | "Camera / microphone blocked" | Grant permission in the address bar; serve over HTTPS (localhost is exempt). |
 | "Unable to reach signaling server" banner | `CORS_ORIGIN` doesn't include your frontend URL, or the service is asleep. |
-| Stuck on **Connecting**, then "Unable to connect" | Almost always a NAT/firewall problem. Check the header readout: if it never leaves `Connecting`, ICE found no direct path. Retry, or switch between Wi-Fi and mobile data. `curl /api/stats \| jq .calls.outcomes` shows how often this happens. |
+| Stuck on **Connecting**, then "Unable to connect" | The media relay could not exchange slices. Check the API/DB and the browser console; `curl /api/stats \| jq .calls.outcomes` shows how often this happens. Retry. |
 | Connects but no audio | Browser tab autoplay policy; click the page once. Check the mic toggle (red = muted). |
 | Works locally, fails in production | Mixed content (page served over HTTPS but `VITE_SIGNALING_URL` is `http://`). Always use `https://`. |
-| High latency / choppy video | Check the RTT readout and lower the resolution cap in `LOCAL_MEDIA_CONSTRAINTS`. |
+| High latency / choppy video | The app relay adds ~1–3 s. Lower the resolution cap in `LOCAL_MEDIA_CONSTRAINTS`, or move to a dedicated SFU for scale. |
 | `npm run test:db` exits **2** | `MARIADB_*` not in `server/.env` — run the §5.5 step 2 command (or add the five lines by hand). |
 | `test:db`: **cannot connect** | `sudo systemctl start mariadb`, or wrong `MARIADB_PORT`. `journalctl -u mariadb` has the details. |
 | `Access denied for user 'matchup'@…` | Wrong password in `server/.env`, or the init script wasn't run — re-run `scripts/mariadb-init.sql` (it is idempotent). |
