@@ -242,8 +242,9 @@ Broadcasts: `room:state { slug, participants: [{id, username, country}], count }
 `room:enter` failure codes: `payment-required` (no paid charge — client opens
 the pay sheet), `adult-only` (under 18 or adult content switched off),
 `room-full`, `room-ended`, `unauthorized`, `groups-disabled`.
-Mesh WebRTC: the side with the **higher** account id is the initiator for that
-pair (deterministic, no glare); each client runs one `Peer` per remote id.
+Media relay: each client runs one `Peer` per remote id. The relay starts recording
+immediately and sends slices over `room:signal`; the initiator rule is retained
+for compatibility but the relay needs no offer/answer handshake.
 
 ---
 

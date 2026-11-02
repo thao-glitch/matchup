@@ -18,7 +18,7 @@
  */
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import type { PageProps } from '../shell/pageProps';
-import type { AppError, CallState } from '../types';
+import type { AppError, CallState, SignalMessage } from '../types';
 import type { RoomAccess, RoomPeer } from '../types/social';
 import { getToken } from '../lib/auth';
 import { getIceConfig } from '../lib/iceServers';
@@ -275,19 +275,18 @@ export default function RoomPage({
 
     function handleSignal(msg: {
       from: number;
-      kind: 'offer' | 'answer' | 'candidate';
+      kind: 'offer' | 'answer' | 'candidate' | 'media';
       payload: unknown;
     }): void {
       if (disposed) return;
       const peer = ensurePeer(msg.from);
       if (!peer) return;
-      // The wire type is `unknown` because SDP and ICE differ: cast by kind,
-      // exactly the split `Peer.handleSignal` performs internally.
-      const payload =
-        msg.kind === 'candidate'
-          ? (msg.payload as RTCIceCandidateInit)
-          : (msg.payload as RTCSessionDescriptionInit);
-      void peer.handleSignal({ kind: msg.kind, payload });
+      // SDP, ICE and relay media all arrive on the same channel. `Peer`
+      // dispatches by `kind`, so the cast is only for the wire type.
+      void peer.handleSignal({
+        kind: msg.kind,
+        payload: msg.payload as SignalMessage['payload'],
+      });
     }
 
     function handleClosed(msg: { byAdmin?: boolean }): void {

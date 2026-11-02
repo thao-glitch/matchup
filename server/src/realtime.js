@@ -44,7 +44,9 @@ const DUEL_PICKS = new Set(['rock', 'paper', 'scissors']);
 /** A session counts as online while its poll keeps coming back. */
 const SESSION_TTL_MS = 120_000;
 /** Inbox rows are read once and forgotten. */
-const INBOX_TTL_MS = 5 * 60 * 1000;
+// Live media slices are only useful for a few seconds; a shorter inbox TTL
+// keeps the DB from holding minutes of video that nobody will play.
+const INBOX_TTL_MS = 2 * 60 * 1000;
 /** How long after a call closes a `call:report` for it is still accepted. */
 const ROOM_HISTORY_TTL_MS = 15 * 60 * 1000;
 /** Long-poll hold: under the function's maxDuration, over a full ICE burst. */
@@ -87,7 +89,23 @@ function sanitizeCallEvent(type, raw) {
   }
 }
 
-const SIGNAL_KINDS = new Set(['offer', 'answer', 'candidate', 'ice']);
+const SIGNAL_KINDS = new Set(['offer', 'answer', 'candidate', 'ice', 'media']);
+/** Largest base64 slice accepted from a browser. ~67 KB decoded. */
+const MAX_MEDIA_CHUNK_CHARS = 90_000;
+
+/** Validate one relayed MediaRecorder slice before it reaches the DB. */
+function isMediaChunk(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false;
+  return (
+    typeof raw.mime === 'string' &&
+    raw.mime.length > 0 &&
+    raw.mime.length <= 80 &&
+    typeof raw.data === 'string' &&
+    raw.data.length > 0 &&
+    raw.data.length <= MAX_MEDIA_CHUNK_CHARS &&
+    Number.isInteger(raw.seq)
+  );
+}
 
 // Per-instance, best-effort buckets: an instance only sees its own traffic,
 // which is exactly as much as these were ever meant to stop.
@@ -420,6 +438,7 @@ async function onRoomEnter(sid, payload) {
 async function onRoomSignal(sid, payload) {
   if (!payload || typeof payload.slug !== 'string') return;
   if (!SIGNAL_KINDS.has(payload.kind)) return;
+  if (payload.kind === 'media' && !isMediaChunk(payload.payload)) return;
   if (!allow('rsig', sid, ROOM_SIGNAL_BUDGET)) return;
   const people = await roster(payload.slug);
   const from = people.find((p) => p.sid === sid);
@@ -516,7 +535,11 @@ async function handleEmit(req, res) {
       case 'signal:data': {
         if (!payload || typeof payload !== 'object') break;
         if (!SIGNAL_KINDS.has(payload.kind)) break;
-        if (!payload.payload || typeof payload.payload !== 'object') break;
+        if (payload.kind === 'media') {
+          if (!isMediaChunk(payload.payload)) break;
+        } else if (!payload.payload || typeof payload.payload !== 'object') {
+          break;
+        }
         if (!allow('sig', sid, SIGNAL_RATE_LIMIT)) break;
         const pair = await findPair(sid);
         if (!pair || payload.roomId !== pair.roomId) break; // spoofed / stale room

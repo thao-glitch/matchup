@@ -83,6 +83,7 @@ const PATH_LABEL: Record<string, string> = {
   host: 'Local network',
   srflx: 'Direct P2P',
   prflx: 'Direct P2P',
+  relay: 'Server relay',
   unknown: '…',
 };
 
@@ -339,7 +340,7 @@ export default function VideoChat({
     const unregisterSignal = registerSignal(roomId, handleSignal);
 
     (async () => {
-      // STUN config is fetched (and cached) from the signaling server.
+      // Media relay config: no STUN/TURN, so this resolves immediately.
       const { iceServers, source } = await getIceConfig();
       if (cancelled) return;
       iceSourceRef.current = (source ?? 'unknown') as IceSource | 'unknown';
@@ -999,9 +1000,8 @@ export default function VideoChat({
               </div>
               <h2 className="text-lg font-semibold text-ink">Unable to connect</h2>
               <p className="mt-2 text-sm leading-relaxed text-muted">
-                We couldn’t build a direct media path to {peer.username}. This is usually a
-                strict firewall, symmetric NAT, or a network that blocks UDP. Try another
-                network — switching between Wi-Fi and mobile data often helps.
+                We couldn’t start the server relay with {peer.username}. Check your connection
+                and try again — switching between Wi-Fi and mobile data can also help.
               </p>
               <div className="mt-5 flex flex-col gap-2 sm:flex-row sm:justify-center">
                 <button type="button" onClick={retry} className="btn btn-primary">

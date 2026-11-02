@@ -1,23 +1,24 @@
 # Matchup — 1v1 global video chat + a creator platform
 
-A production-ready, peer-to-peer 1v1 video chat app — wrapped in a social
-platform where creators post content, charge for it in KES and get paid over
-M-PESA. Two strangers are matched by
-preference and connected directly over WebRTC — **video/audio never touch the
-server**; the server only introduces people and relays a few kilobytes of SDP/ICE.
+A production-ready 1v1 video chat app — wrapped in a social platform where
+creators post content, charge for it in KES and get paid over M-PESA. Two
+strangers are matched by preference and exchange media through Matchup's own
+app-server relay. There is **no STUN, TURN, WebRTC or peer-to-peer dependency**:
+the browser encodes camera/mic slices and sends them over the same authenticated
+HTTP channel as signaling, and the server forwards them to the partner.
 
 ```
-  Browser A  ──WebSocket──▶  Signaling server (Node + Socket.io)  ◀──WebSocket──  Browser B
-      │                            matchmaking + SDP relay                                │
-      └──────────────────────── WebRTC (UDP, direct peer-to-peer) ──────────────┘
+  Browser A  ──HTTP long-poll──▶  Matchup server (Node + Express)  ◀──HTTP long-poll──  Browser B
+      │                         matchmaking + signaling + media relay                         │
+      └──────────────────── encoded media slices (no STUN/TURN/NAT) ───────────────────────┘
 ```
 
 | Layer      | Tech                                                          |
 | ---------- | ------------------------------------------------------------- |
 | Frontend   | React 19 + Vite + TypeScript + Tailwind CSS v4                 |
-| Signaling  | Node.js + Express 5 + Socket.io                                |
+| Signaling  | Node.js + Express 5 + HTTP long-poll                           |
 | Database   | MariaDB → MongoDB → in-memory (first one configured wins)      |
-| NAT punch  | STUN (Google + Twilio; direct P2P, no relay)                   |
+| Media      | MediaRecorder → app-server HTTP relay (no STUN/TURN)           |
 | Deployment | **One container** — app + API + admin on Koyeb/Render/VPS ([DEPLOY.md](DEPLOY.md)) |
 
 **Verified end-to-end**: 44/44 browser E2E checks (match → ICE → both-way video →
@@ -25,7 +26,7 @@ mute/camera → chat → Spark → rock-paper-scissors duel → hang-up → *Nex
 re-match → share card → live country board → the Passport → accounts →
 telemetry), 28/28 account checks, 40/40 platform checks (commission split,
 M-PESA charges, wallets, payouts), 26/26 dashboard checks, 16/16 signaling
-checks, plus a live STUN reachability check. See [Testing](#7-testing).
+checks, plus a live relay-transport check. See [Testing](#7-testing).
 
 **Accounts**: create a username + password once (scrypt-hashed in MariaDB), stay
 signed in on that device, come back later with everything prefilled — and change
@@ -90,7 +91,7 @@ matchup/
 │           ├── signaling.ts          # typed Socket.io client + event contract
 │           ├── rooms.ts              # room socket client (mesh group calls)
 │           ├── peer.ts               # RTCPeerConnection wrapper (the core)
-│           ├── iceServers.ts         # STUN config fetched from the server
+│           ├── iceServers.ts         # media transport config (relay mode)
 │           ├── auth.ts               # /api/auth client + bearer token in localStorage
 │           ├── social.ts             # /api/posts, /api/wallet, /api/rooms client
 │           ├── router.tsx            # pathname router (no dependency)
@@ -118,7 +119,7 @@ matchup/
 │       ├── rooms.js                  # RoomHub — mesh signaling for group calls
 │       ├── settings.js               # payment/features/commerce/mpesa config + sanitizers
 │       ├── admin.js                  # every dashboard operation + audit trail
-│       ├── iceConfig.js              # public STUN list served to browsers
+│       ├── iceConfig.js              # relay config served to browsers
 │       ├── telemetry.js              # per-call outcome aggregation (/api/stats)
 │       ├── mariaStore.js             # local MariaDB backend (profiles, accounts, social tables)
 │       └── store.js                  # MariaDB → MongoDB → in-memory facade
@@ -132,7 +133,7 @@ matchup/
 │   ├── test-admin.js                # 26 checks: the dashboard (login, ledger, bans)
 │   ├── test-platform.js             # 40 checks: posts, M-PESA charges, commission, wallets
 │   ├── test-ui.js                   # 15 checks: the social shell renders, tabs resolve
-│   ├── e2e.js                       # 44 checks: Chromium + WebRTC
+│   ├── e2e.js                       # 44 checks: Chromium + media relay
 │   └── package.json                 # e2e needs puppeteer-core only
 │
 ├── docs/
@@ -255,7 +256,7 @@ Defined once in `client/src/lib/signaling.ts`, mirrored in `server/src/protocol.
 The relay only forwards messages whose `roomId` matches the sender's room, is rate
 limited (80 msgs/s/socket) and capped at 1 MB per packet.
 
-### 4.3 WebRTC (`client/src/lib/peer.ts`)
+### 4.3 Media transport (`client/src/lib/peer.ts`)
 
 A small, dependency-free `RTCPeerConnection` wrapper instead of `simple-peer`
 (unmaintained, hides exactly the state we must surface). It implements:
@@ -269,27 +270,33 @@ A small, dependency-free `RTCPeerConnection` wrapper instead of `simple-peer`
 * **Watchdog** — ICE can hang forever in `checking`; after 20 s we restart, after
   2 more attempts we surface **"Unable to connect"** with *Try again* / *Find
   someone else*.
-* **Path readout** — `getStats()` shows `Local network` / `Direct P2P` plus RTT
-  in the call header, so you can *see* how the peer connection is doing.
+* **Path readout** — `getStats()` shows `Server relay` in the call header, so
+  the UI is explicit about the transport in use.
 
 Connection states → UI: `connecting` · `connected` · `reconnecting` · `failed`.
 
-### 4.4 Direct connectivity (STUN only)
+### 4.4 Media connectivity (app-server relay)
 
 ```
-STUN → discovers each side's public IP:port. Free, global, and enough for most
-       home and mobile networks to build a direct peer-to-peer path.
+MediaRecorder → ~800 ms encoded slices → POST /api/rt/emit → partner inbox
+              → partner appends to MediaSource → <video> plays the stream
 ```
 
-* Google STUN (`stun:stun.l.google.com:19302` …) and Twilio's global STUN are
-  configured in `server/src/iceConfig.js`.
-* The browser fetches `GET /api/ice` at call time. There are **no relay
-  credentials and no TURN server**: video, audio and the in-call chat are
-  peer-to-peer, and the server only relays a few KB of SDP/ICE signaling.
-* `GET /health` → `ice: { source: "stun-only", stunHosts, cachedUntil }`.
-* If two networks cannot build a direct path, the call fails cleanly with
-  **"Unable to connect"**. The user can retry, find someone else, or switch
-  networks (Wi-Fi ↔ mobile data often helps). There is no hidden relay bill.
+* The browser captures camera/mic and records small WebM (or MP4) slices.
+  Each slice is base64-encoded and sent as a `signal:data` message with
+  `kind: "media"`; the server validates size/rate and forwards it to the
+  partner. The partner appends slices to a `MediaSource` and exposes the
+  resulting `<video>` as a `MediaStream`, so the call UI is unchanged.
+* There is **no ICE, no STUN, no TURN and no UDP requirement**. This works on
+  CGNAT, strict corporate firewalls and mobile carriers because it rides the
+  same HTTPS/long-poll channel as chat and signaling.
+* `GET /api/ice` returns `{ iceServers: [], source: "relay" }`.
+  `GET /health` → `ice: { source: "relay", transport: "http-long-poll" }`.
+* The trade-off is latency (roughly 1–3 seconds) and server bandwidth. This is
+  a relay, not a low-latency SFU; size the deployment for the media volume you
+  expect.
+* If the relay cannot start, the call fails cleanly with **"Unable to
+  connect"**. Chat still works because it uses the same signaling channel.
 
 **Call telemetry.** Every call sends one `call:report` (selected ICE candidate
 pair, RTT, duration). They aggregate in `GET /api/stats` → `calls`:
@@ -297,15 +304,15 @@ pair, RTT, duration). They aggregate in `GET /api/stats` → `calls`:
 ```jsonc
 {
   "outcomes": { "connected": 42, "failed": 3, "successRate": 93.3 },
-  "paths":    { "host": 4, "srflx": 31, "prflx": 0, "unknown": 0 },
-  "iceSources": { "stun-only": 45, "unknown": 0 },
+  "paths":    { "host": 0, "srflx": 0, "prflx": 0, "relay": 42, "unknown": 3 },
+  "iceSources": { "relay": 42, "unknown": 3 },
   "rttMs": { "samples": 42, "avg": 47 }
 }
 ```
 
 `outcomes.failed` is the number that matters: every one of those is a user who
-saw "Unable to connect". `paths.host` / `paths.srflx` show how successful calls
-found each other.
+saw "Unable to connect". `paths.relay` shows calls that used the app relay;
+`host`/`srflx` remain in the schema for historical rows.
 
 ### 4.5 Accounts, sessions and the post-call flow
 
@@ -535,20 +542,23 @@ open http://localhost:4000        # the whole app
 If you'd rather build the client on the host (`cd client && npm run build`),
 the server still auto-detects `client/dist` and serves the SPA exactly as before.
 
-### 5.4 Network connectivity (STUN only)
+### 5.4 Network connectivity (app-server relay)
 
-Matchup does **not** run or require a TURN relay. Calls are direct peer-to-peer:
+Matchup does **not** run or require STUN or TURN. Media is relayed by the app:
 
-* `server/src/iceConfig.js` serves a public STUN list from `GET /api/ice`.
-* The client validates every ICE URL before creating `RTCPeerConnection`.
-* No `TURN_*`, `CF_TURN_*` or `TWILIO_*` variables are needed; none are read.
-* If direct ICE fails, the UI explains the network problem and offers **Try
+* `server/src/iceConfig.js` serves an empty ICE list from `GET /api/ice`
+  (`source: "relay"`); no STUN/TURN URL is configured or read.
+* The browser records camera/mic slices and sends them over the same HTTP
+  long-poll channel as signaling. No UDP ports, public IPs or NAT traversal are
+  needed.
+* No `TURN_*`, `CF_TURN_*`, `STUN_*` or `TWILIO_*` variables are needed.
+* If the relay cannot start, the UI explains the problem and offers **Try
   again** / **Find someone else**. Chat events still travel over the signaling
-  socket, independent of whether media connects.
-* `GET /health` reports `ice.source: "stun-only"`.
+  channel, independent of media.
+* `GET /health` reports `ice.source: "relay"`.
 
-No firewall rule, container, systemd unit or hosted relay account is part of
-this deployment.
+No firewall rule, UDP port, container, systemd unit or hosted relay account is
+part of this deployment.
 
 ### 5.5 Keeping the database on this PC (MariaDB)
 
@@ -647,7 +657,7 @@ server can boot first and silently fall back to the in-memory store.
 ```ini
 # ~/.config/systemd/user/matchup.service
 [Unit]
-Description=Matchup signaling server (WebRTC 1v1 video chat)
+Description=Matchup signaling + media relay (1v1 video chat)
 After=network-online.target
 Wants=network-online.target
 
@@ -758,7 +768,7 @@ npm run test:admin
 npm run test:ui
 
 # End-to-end: 44 checks — two real Chromium pages, fake camera/mic, full
-# WebRTC handshake both ways, controls, the in-call playground (chat
+# Media relay both ways, controls, the in-call playground (chat
 # round-trip, Spark card on both screens, duel resolving identically),
 # hang-up → post-call screen → Next,
 # re-match, share card ("Connection card ready" + the card shown back),
@@ -816,7 +826,7 @@ node scripts/e2e.js
 * Only public profile fields (username, age, gender, country) are ever shared with
   the partner — the age range and preferences stay server-side.
 * Profiles are stored per session and auto-expire after 30 days (Mongo TTL index).
-* Media is peer-to-peer; the server relays signaling only.
+* Media is relayed by the app server; no STUN/TURN is involved.
 * The live board publishes **sums only** — `/api/presence` returns a country code
   and a count, never a name, IP, session or timestamp (self-reported country, the
   same field matchmaking uses). The share card is rendered in your browser and
@@ -830,10 +840,10 @@ Two different problems get confused constantly:
 
 | | Question | Lever |
 | --- | --- | --- |
-| **Reach (technical)** | Can two browsers build a video path? | STUN + a working direct network |
+| **Reach (technical)** | Can two browsers exchange media? | the app relay over HTTPS |
 | **Distribution (growth)** | Does anyone ever hear about the app? | the playbook below |
 
-STUN is already handled in §4.4/§5.4. Distribution is where the leverage is.
+The relay is already handled in §4.4/§5.4. Distribution is where the leverage is.
 
 ### 9.1 Globally, through browsers
 

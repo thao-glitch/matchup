@@ -1,47 +1,28 @@
 /**
- * ICE server configuration — public STUN only.
+ * Media transport configuration — app-server relay, no STUN/TURN.
  *
- * Matchup connects two browsers directly. STUN discovers each side's public
- * IP:port so the peers can punch through ordinary home routers. No TURN relay
- * is configured or required: if two networks cannot build a direct path, the
- * call fails cleanly and the user can retry or find someone else.
+ * Matchup no longer asks browsers to discover public addresses or traverse
+ * NATs. The server receives encoded media chunks over the existing signaling
+ * channel and forwards them to the partner. This works on any network that
+ * can reach the app, including CGNAT, strict corporate firewalls and mobile
+ * carriers.
  *
- * The browser fetches this list from `GET /api/ice`, so the client bundle
- * never hard-codes the list and the server can change it without a rebuild.
+ * `GET /api/ice` is kept for diagnostics and returns an empty ICE list with
+ * `source: "relay"`. No STUN or TURN URL is configured anywhere.
  */
-
-const STUN_SERVERS = [
-  {
-    // Google's anycast STUN fleet: any region reaches a nearby node, which
-    // keeps the ICE check round-trip low on every continent.
-    urls: [
-      'stun:stun.l.google.com:19302',
-      'stun:stun1.l.google.com:19302',
-      'stun:stun2.l.google.com:19302',
-      'stun:stun3.l.google.com:19302',
-      'stun:stun4.l.google.com:19302',
-      'stun:global.stun.twilio.com:3478',
-    ],
-  },
-];
 
 const CACHE_TTL_MS = 10 * 60 * 1000;
 let cached = null;
 
 function buildConfig() {
   return {
-    iceServers: STUN_SERVERS,
+    iceServers: [],
     expiresAt: Date.now() + CACHE_TTL_MS,
-    source: 'stun-only',
+    source: 'relay',
   };
 }
 
-/**
- * Resolve the ICE list shared by every caller.
- *
- * The list is cached for a few minutes so every call in a busy process does
- * not rebuild it. There are no credentials and no network lookup involved.
- */
+/** Resolve the media transport config (cached, no credentials, no lookup). */
 async function getIceConfig() {
   if (cached && cached.expiresAt - 30 * 1000 > Date.now()) return cached;
   cached = buildConfig();
@@ -51,8 +32,8 @@ async function getIceConfig() {
 /** What the operator configured — surfaces in `/health` and `/api/stats`. */
 function describeIce() {
   return {
-    source: 'stun-only',
-    stunHosts: STUN_SERVERS[0].urls.length,
+    source: 'relay',
+    transport: 'http-long-poll',
     cachedUntil: cached ? new Date(cached.expiresAt).toISOString() : null,
   };
 }
@@ -65,5 +46,4 @@ module.exports = {
   getIceConfig,
   resetIceCache,
   describeIce,
-  STUN_SERVERS,
 };

@@ -1,9 +1,9 @@
 # Running Matchup standalone (one container, one URL, no PC required)
 
-Matchup ships as **a single container**: the React app, the API, the WebSocket
-signaling server and the `/admin` dashboard all come out of one `node server.js`
-process. There is no separate frontend host, nothing to keep in sync and no CORS
-to configure — the browser talks to one origin for everything.
+Matchup ships as **a single container**: the React app, the API, the HTTP
+signaling + media relay and the `/admin` dashboard all come out of one
+`node server.js` process. There is no separate frontend host, nothing to keep in
+sync and no CORS to configure — the browser talks to one origin for everything.
 
 | Piece | Where | Cost |
 | --- | --- | --- |
@@ -11,9 +11,9 @@ to configure — the browser talks to one origin for everything.
 | Database (accounts, passports, payments, settings) | **Aiven for MySQL** — free tier, no card | free |
 | Image registry | **Docker Hub** — free | free |
 
-> Media itself is **peer-to-peer over WebRTC** — video never touches your
-> server. The container only introduces people and relays a few KB of SDP/ICE.
-> There is no TURN relay to host or pay for.
+> Media is **relayed by this container** over the same HTTPS long-poll channel
+> as signaling. There is no STUN, no TURN and no UDP port to open. Budget for
+> the relay's bandwidth: video/audio now pass through the server.
 
 ---
 
@@ -99,18 +99,21 @@ curl -s https://<app>-<id>.koyeb.app/health
 
 `store:maria` proves the database is live and the schema was created for you.
 
-## 4. Network connectivity (STUN only)
+## 4. Network connectivity (app-server relay)
 
-Video, audio and the in-call chat travel directly between the two browsers.
-`GET /api/ice` serves a public STUN list; there is no TURN relay, no relay
-credentials, and no extra service to deploy. Calls that cannot build a direct
-path fail cleanly with **Unable to connect**, and the user can retry or switch
-networks. Confirm the mode with:
+Video, audio and the in-call chat travel through the app's HTTP relay. The
+browser records small camera/mic slices and posts them to `/api/rt/emit`; the
+server forwards them to the partner's long-poll inbox. No STUN/TURN service,
+UDP port or public IP is required. Calls that cannot start fail cleanly with
+**Unable to connect**, and the user can retry. Confirm the mode with:
 
 ```bash
 curl -s https://<app>-<id>.koyeb.app/health | jq .ice
-# { "source": "stun-only", "stunHosts": 6, "cachedUntil": null }
+# { "source": "relay", "transport": "http-long-poll", "cachedUntil": null }
 ```
+
+The trade-off is latency (roughly 1–3 seconds) and server bandwidth. Size the
+container and database for the expected media volume.
 
 ## 5. First admin login (2 min)
 

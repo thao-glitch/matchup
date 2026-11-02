@@ -44,7 +44,13 @@ app.disable('x-powered-by');
 app.set('trust proxy', 1); // Render / Railway / Cloudflare sit in front of us
 
 app.use(cors({ origin: ORIGINS.includes('*') ? true : ORIGINS }));
-app.use(express.json({ limit: '32kb' }));
+// Most JSON bodies are tiny. Realtime emits also carry base64 media slices, so
+// they get a larger (still bounded) parser; 32 KB would reject a keyframe.
+const smallJson = express.json({ limit: '32kb' });
+const realtimeJson = express.json({ limit: '160kb' });
+app.use((req, res, next) =>
+  (req.path === '/api/rt/emit' ? realtimeJson : smallJson)(req, res, next),
+);
 
 // Minimal security headers (swap in `helmet` if you want the full set).
 app.use((req, res, next) => {
@@ -95,7 +101,7 @@ app.get('/health', async (req, res) => {
     features: settings.get().features,
     // Group calls / conferences that are live right now.
     rooms,
-    // ICE is STUN-only; video and audio always travel peer-to-peer.
+    // Media is relayed by the app server; no STUN/TURN dependency.
     ice: describeIce(),
     // Where post media lives: `vercel-blob` keeps bytes out of MariaDB.
     media: mediaStore.describe(),
@@ -103,8 +109,11 @@ app.get('/health', async (req, res) => {
 });
 
 /**
- * Returns the public STUN list used for direct peer-to-peer connections.
- * There are no relay credentials, so nothing secret is exposed here.
+ * Returns the media transport config for diagnostics.
+ *
+ * Relay mode: `iceServers` is always empty and `source` is `"relay"`. The
+ * endpoint is kept so older clients, the admin health page and operational
+ * probes do not break while the transport is server-relayed.
  */
 app.get('/api/ice', async (req, res) => {
   try {
@@ -112,11 +121,11 @@ app.get('/api/ice', async (req, res) => {
     res.set('Cache-Control', 'no-store').json(config);
   } catch (err) {
     console.error('[ice] endpoint failed:', err.message);
-    // Degrade rather than 500: the client falls back to its own STUN list.
+    // Degrade rather than 500: relay mode needs no ICE servers at all.
     res.set('Cache-Control', 'no-store').json({
-      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+      iceServers: [],
       expiresAt: Date.now() + 5 * 60 * 1000,
-      source: 'stun-only',
+      source: 'relay',
     });
   }
 });
@@ -175,6 +184,9 @@ function rateLimit({ windowMs, max }) {
 
 const credentialLimiter = rateLimit({ windowMs: 60_000, max: 20 });
 const sessionLimiter = rateLimit({ windowMs: 60_000, max: 120 });
+// Realtime emits carry relayed media slices: two callers on one IP send ~150
+// small POSTs/min, so this bucket is deliberately larger than the session one.
+const realtimeLimiter = rateLimit({ windowMs: 60_000, max: 600 });
 // The Europe board polls every ~10s while it is open — 60/min/IP is generous.
 const presenceLimiter = rateLimit({ windowMs: 60_000, max: 60 });
 
@@ -207,7 +219,7 @@ app.get('/api/presence', presenceLimiter, async (req, res) => {
  * produces back to the client is written to the session's inbox row, which
  * `GET /api/rt/poll` drains.
  */
-app.post('/api/rt/emit', sessionLimiter, (req, res, next) => {
+app.post('/api/rt/emit', realtimeLimiter, (req, res, next) => {
   realtime.handleEmit(req, res).catch(next);
 });
 
@@ -217,7 +229,7 @@ app.post('/api/rt/emit', sessionLimiter, (req, res, next) => {
  * the function's maxDuration is never hit), then returns the events plus the
  * live presence and, when queued, the current wait position.
  */
-app.get('/api/rt/poll', sessionLimiter, (req, res, next) => {
+app.get('/api/rt/poll', realtimeLimiter, (req, res, next) => {
   realtime.handlePoll(req, res).catch(next);
 });
 

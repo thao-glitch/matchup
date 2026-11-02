@@ -118,11 +118,21 @@ export interface StampInfo {
   streak: number;
 }
 
-/** SDP + ICE relayed through the signaling server. Media never touches it. */
+/** One encoded media slice relayed through the app server. */
+export interface MediaChunk {
+  /** MediaRecorder mime type, e.g. `video/webm;codecs=vp8,opus`. */
+  mime: string;
+  /** Monotonic sequence number, useful when debugging dropped slices. */
+  seq: number;
+  /** Base64-encoded MediaRecorder blob. */
+  data: string;
+}
+
+/** Signaling and media both travel through the server; no STUN/TURN. */
 export interface SignalMessage {
   roomId: string;
-  kind: 'offer' | 'answer' | 'candidate';
-  payload: RTCSessionDescriptionInit | RTCIceCandidateInit;
+  kind: 'offer' | 'answer' | 'candidate' | 'media';
+  payload: RTCSessionDescriptionInit | RTCIceCandidateInit | MediaChunk;
 }
 
 export type CallState =
@@ -143,8 +153,8 @@ export type AppError = {
   message: string;
 };
 
-/** `host` = LAN, `srflx`/`prflx` = direct P2P via STUN. */
-export type PathType = 'host' | 'srflx' | 'prflx' | 'unknown';
+/** `host` = LAN, `srflx`/`prflx` = legacy direct paths, `relay` = app server. */
+export type PathType = 'host' | 'srflx' | 'prflx' | 'relay' | 'unknown';
 
 export interface NetworkStats {
   path: PathType;
@@ -153,8 +163,8 @@ export interface NetworkStats {
   protocol: string | null;
 }
 
-/** Where the ICE credentials came from (this app serves `stun-only`). */
-export type IceSource = 'stun-only';
+/** Where media is transported (this app serves `relay`). */
+export type IceSource = 'relay';
 
 /** The in-call playground channels relayed through `call:event`. */
 export type CallEventType = 'chat' | 'react' | 'spark' | 'duel';
@@ -181,7 +191,7 @@ export interface ChatMessage {
 export interface CallReport {
   roomId: string;
   outcome: 'connected' | 'failed';
-  /** Selected ICE candidate-pair type: host, srflx or prflx. */
+  /** Selected transport: host, srflx, prflx or the app relay. */
   path?: PathType | null;
   rttMs?: number | null;
   durationMs?: number | null;

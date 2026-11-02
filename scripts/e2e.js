@@ -213,11 +213,11 @@ async function main() {
     assert(Boolean(remoteA), `A receives remote video frames ${JSON.stringify(vA)}`);
     assert(Boolean(remoteB), `B receives remote video frames ${JSON.stringify(vB)}`);
 
-    // Path readout (Local network / Direct P2P) from getStats()
+    // Path readout (Local network / Server relay) from getStats()
     let pathA = null;
     for (let i = 0; i < 8; i++) {
       pathA = await pageA.evaluate(
-        () => (document.body.innerText.match(/Local network|Direct P2P/) || [])[0] || null,
+        () => (document.body.innerText.match(/Local network|Server relay/) || [])[0] || null,
       );
       if (pathA) break;
       await sleep(1000);
@@ -422,7 +422,7 @@ async function main() {
     for (let i = 0; i < 25; i++) {
       const readPath = (page) =>
         page.evaluate(
-          () => (document.body.innerText.match(/Local network|Direct P2P/) || [])[0] || null,
+          () => (document.body.innerText.match(/Local network|Server relay/) || [])[0] || null,
         );
       pathA2 = await readPath(pageA);
       pathB2 = await readPath(pageB);
@@ -453,6 +453,7 @@ async function main() {
         (serverStats.calls?.paths?.unknown ?? 0) +
           (serverStats.calls?.paths?.srflx ?? 0) +
           (serverStats.calls?.paths?.prflx ?? 0) +
+          (serverStats.calls?.paths?.relay ?? 0) +
           (serverStats.calls?.paths?.host ?? 0) >=
           1,
         `telemetry recorded media paths (${JSON.stringify(serverStats.calls?.paths)})`,
@@ -460,7 +461,7 @@ async function main() {
       const sources = Object.entries(serverStats.calls?.iceSources || {})
         .filter(([, n]) => n > 0)
         .map(([k]) => k);
-      assert(sources.length >= 1, `telemetry recorded the ICE source (${sources.join(', ')})`);
+      assert(sources.length >= 1, `telemetry recorded the media transport (${sources.join(', ')})`);
     } else {
       bad('could not read /api/stats');
     }

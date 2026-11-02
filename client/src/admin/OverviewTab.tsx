@@ -189,10 +189,10 @@ export default function OverviewTab() {
                   hint={`${data.calls.outcomes.connected} connected`}
                 />
                 <Stat
-                  label="Direct P2P"
-                  value={data.calls.paths.host + data.calls.paths.srflx + data.calls.paths.prflx}
+                  label="Relay path"
+                  value={data.calls.paths.relay}
                   tone="ok"
-                  hint="host / STUN paths"
+                  hint="app server relay"
                 />
                 <Stat
                   label="Avg RTT"
@@ -340,7 +340,7 @@ export default function OverviewTab() {
                       <th className={TH}>When</th>
                       <th className={TH}>Outcome</th>
                       <th className={TH}>Path</th>
-                      <th className={TH}>ICE source</th>
+                      <th className={TH}>Media transport</th>
                       <th className={TH}>RTT</th>
                       <th className={TH}>Duration</th>
                       <th className={TH}>Room</th>

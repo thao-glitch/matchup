@@ -1,13 +1,12 @@
 /**
- * Call outcome telemetry — a live view of whether direct peer connections
- * are working.
+ * Call outcome telemetry — a live view of whether calls are working.
  *
- * Each client reports once per room (`call:report`) with the selected ICE
- * candidate-pair type, RTT and duration. From that we can answer:
+ * Each client reports once per room (`call:report`) with the selected media
+ * transport, RTT (if any) and duration. From that we can answer:
  *
  *   • how many matched pairs actually reach "connected"?   (success rate)
- *   • which path did they use — LAN, STUN, or unknown?     (path mix)
- *   • how many users never found a direct path?            (failed calls)
+ *   • which path did they use — LAN, direct, relay, unknown? (path mix)
+ *   • how many users never connected?                      (failed calls)
  *
  * Reports are keyed by roomId so a retry after a failed attempt converges on
  * one row instead of double counting. Everything is in-memory: it is an
@@ -15,7 +14,7 @@
  */
 
 const OUTCOMES = new Set(['connected', 'failed']);
-const PATHS = new Set(['host', 'srflx', 'prflx', 'unknown']);
+const PATHS = new Set(['host', 'srflx', 'prflx', 'relay', 'unknown']);
 
 /** Cap so a long-lived process cannot grow without bound. */
 const MAX_ROOMS = 2000;
@@ -62,7 +61,7 @@ function record(raw) {
     rttMs: num(raw.rttMs, 0, 60_000),
     durationMs: num(raw.durationMs, 0, 24 * 3600 * 1000),
     attempts: num(raw.attempts, 1, 99) ?? 1,
-    iceSource: str(raw.iceSource, new Set(['stun-only']), 'unknown'),
+    iceSource: str(raw.iceSource, new Set(['relay']), 'unknown'),
     at: Date.now(),
   };
 
@@ -85,8 +84,8 @@ function snapshot() {
   const connected = all.filter((r) => r.outcome === 'connected');
   const failed = all.filter((r) => r.outcome === 'failed');
 
-  const byPath = { host: 0, srflx: 0, prflx: 0, unknown: 0 };
-  const bySource = { 'stun-only': 0, unknown: 0 };
+  const byPath = { host: 0, srflx: 0, prflx: 0, relay: 0, unknown: 0 };
+  const bySource = { relay: 0, unknown: 0 };
   for (const r of all) {
     byPath[r.path] += 1;
     bySource[r.iceSource] += 1;

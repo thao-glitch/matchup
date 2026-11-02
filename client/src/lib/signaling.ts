@@ -49,7 +49,7 @@ export interface ServerToClientEvents {
     slug: string;
     from: number;
     username?: string;
-    kind: 'offer' | 'answer' | 'candidate';
+    kind: 'offer' | 'answer' | 'candidate' | 'media';
     payload: unknown;
   }) => void;
   /** Group room: the roster changed — sync your peer connections to it. */
@@ -83,7 +83,7 @@ export interface ClientToServerEvents {
   'room:signal': (msg: {
     slug: string;
     to: number;
-    kind: 'offer' | 'answer' | 'candidate';
+    kind: 'offer' | 'answer' | 'candidate' | 'media';
     payload: unknown;
   }) => void;
   'room:leave': (msg: { slug: string }) => void;

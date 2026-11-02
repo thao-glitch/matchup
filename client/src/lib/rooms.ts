@@ -105,7 +105,7 @@ export interface EnterRoomHandlers {
     slug: string;
     from: number;
     username?: string;
-    kind: 'offer' | 'answer' | 'candidate';
+    kind: 'offer' | 'answer' | 'candidate' | 'media';
     payload: unknown;
   }) => void;
   onClosed: (msg: { slug: string; byAdmin?: boolean }) => void;
