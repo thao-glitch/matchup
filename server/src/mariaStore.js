@@ -464,6 +464,8 @@ const ACCOUNT_COLUMNS = [
   ['banned_at', 'DATETIME NULL DEFAULT NULL'],
   ['premium_until', 'DATETIME NULL DEFAULT NULL'],
   ['last_ip', 'VARCHAR(45) NULL DEFAULT NULL'],
+  ['avatar_key', 'VARCHAR(80) NULL DEFAULT NULL'],
+  ['banner_key', 'VARCHAR(80) NULL DEFAULT NULL'],
 ];
 
 /**
@@ -946,6 +948,8 @@ function mapAccount(row) {
     banned: Boolean(row.banned_at),
     premiumUntil: row.premium_until ? new Date(row.premium_until) : null,
     lastIp: row.last_ip || null,
+    avatarKey: row.avatar_key || null,
+    bannerKey: row.banner_key || null,
     profile: {
       username: row.username,
       age: Number(row.age),
@@ -1056,6 +1060,53 @@ function recordAccountIp(id, ip) {
   pool
     .query('UPDATE accounts SET last_ip = ? WHERE id = ?', [value, Number(id)])
     .catch((err) => console.error('[store] record ip failed:', err.message));
+}
+
+/**
+ * Point one account at its profile photo (`avatar` or `banner`) or clear it.
+ * The bytes live in object storage / `media_blobs`; the row only holds the
+ * key, which is what makes the photo survive a redeploy.
+ */
+async function setAccountPhoto(id, kind, key) {
+  if (!pool) {
+    const err = new Error('database not ready');
+    err.code = 'DB_UNAVAILABLE';
+    throw err;
+  }
+  const column = kind === 'banner' ? 'banner_key' : 'avatar_key';
+  const value = key ? String(key).slice(0, 80) : null;
+  await pool.query(`UPDATE accounts SET ${column} = ? WHERE id = ?`, [value, Number(id)]);
+  const [rows] = await pool.query(
+    'SELECT id, username, avatar_key, banner_key FROM accounts WHERE id = ? LIMIT 1',
+    [Number(id)],
+  );
+  const row = rows[0];
+  return row
+    ? {
+        id: Number(row.id),
+        username: row.username,
+        avatarKey: row.avatar_key || null,
+        bannerKey: row.banner_key || null,
+      }
+    : null;
+}
+
+/** Which photo keys a public profile view should render (null = none). */
+async function getAccountPhotos(username) {
+  if (!pool) return null;
+  const [rows] = await pool.query(
+    'SELECT id, username, avatar_key, banner_key FROM accounts WHERE username = ? LIMIT 1',
+    [String(username || '')],
+  );
+  const row = rows[0];
+  return row
+    ? {
+        id: Number(row.id),
+        username: row.username,
+        avatarKey: row.avatar_key || null,
+        bannerKey: row.banner_key || null,
+      }
+    : null;
 }
 
 /** Store a session keyed by the SHA-256 of the bearer token. */
@@ -1269,6 +1320,8 @@ function mapUserRow(row) {
     banned: Boolean(row.banned_at),
     bannedAt: iso(row.banned_at),
     premiumUntil: iso(row.premium_until),
+    avatarKey: row.avatar_key || null,
+    bannerKey: row.banner_key || null,
     countries: Number(row.countries) || 0,
     paymentsTotal: Number(row.payments_total) || 0,
     paymentsPending: Number(row.payments_pending) || 0,
@@ -1669,7 +1722,14 @@ async function listMediaKeys() {
   const rows = await query(
     `SELECT media_key AS k FROM posts WHERE media_key IS NOT NULL AND media_key <> ''`,
   );
-  return rows.map((row) => String(row.k)).filter(Boolean);
+  // Profile photos hang off `accounts`, not posts — without them in the keep
+  // set the lifecycle sweep would delete every avatar it could not find.
+  const photos = await query(
+    `SELECT avatar_key AS k FROM accounts WHERE avatar_key IS NOT NULL AND avatar_key <> ''
+     UNION
+     SELECT banner_key AS k FROM accounts WHERE banner_key IS NOT NULL AND banner_key <> ''`,
+  );
+  return [...rows, ...photos].map((row) => String(row.k)).filter(Boolean);
 }
 
 /**
@@ -1681,20 +1741,25 @@ async function listMediaKeys() {
  */
 async function purgeMediaBlobs(cutoffMs, { dryRun = false } = {}) {
   const cutoff = Number(cutoffMs) || 0;
+  // A blob is kept if any post *or any account profile photo* still points at
+  // it — the join is the whole reason the sweep is safe to run daily.
+  const KEEP = `LEFT JOIN posts p ON p.media_key = mb.key
+      LEFT JOIN accounts av ON av.avatar_key = mb.key
+      LEFT JOIN accounts bn ON bn.banner_key = mb.key`;
   if (dryRun) {
     const rows = await query(
       `SELECT COUNT(*) AS n
          FROM media_blobs mb
-         LEFT JOIN posts p ON p.media_key = mb.key
-        WHERE p.id IS NULL AND mb.created_at < ?`,
+         ${KEEP}
+        WHERE p.id IS NULL AND av.id IS NULL AND bn.id IS NULL AND mb.created_at < ?`,
       [cutoff],
     );
     return Number(rows[0]?.n) || 0;
   }
   const result = await query(
     `DELETE mb FROM media_blobs mb
-      LEFT JOIN posts p ON p.media_key = mb.key
-      WHERE p.id IS NULL AND mb.created_at < ?`,
+      ${KEEP}
+      WHERE p.id IS NULL AND av.id IS NULL AND bn.id IS NULL AND mb.created_at < ?`,
     [cutoff],
   );
   return Number(result.affectedRows) || 0;
@@ -1793,6 +1858,8 @@ module.exports = {
   deleteSession,
   deleteSessionsForAccount,
   recordAccountIp,
+  setAccountPhoto,
+  getAccountPhotos,
   deleteAccount,
   // Admins
   countAdmins,

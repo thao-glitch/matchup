@@ -39,6 +39,24 @@ let backend = 'memory';
 const sha256 = (value) => crypto.createHash('sha256').update(value).digest('hex');
 const DUMMY_HASH = `${'00'.repeat(16)}:${'00'.repeat(32)}`;
 
+/** snake_case subscription row → camelCase, tolerating DECIMAL-as-string. */
+function mapSubscription(row) {
+  if (!row) return null;
+  return {
+    id: Number(row.id),
+    subscriberId: Number(row.subscriber_id),
+    creatorId: Number(row.creator_id),
+    otherUsername: row.other_username || '',
+    status: row.status,
+    price: Number(row.price) || 0,
+    currency: row.currency || 'KES',
+    periodDays: Number(row.period_days) || 30,
+    startedAt: row.started_at || null,
+    expiresAt: row.expires_at || null,
+    canceledAt: row.canceled_at || null,
+  };
+}
+
 function init(storeMode) {
   backend = storeMode === 'maria' ? 'maria' : 'memory';
 }
@@ -412,7 +430,8 @@ async function listPosts(query) {
     q: query.q,
     adult: true, // the dashboard sees everything, including the adult shelf
     creatorId: query.creatorId || null,
-    status: query.status || 'all',
+    // `''` (the dashboard's "All") must mean every status, not the feed default.
+    status: query.status && query.status !== '' ? query.status : 'all',
   });
 }
 
@@ -499,7 +518,9 @@ async function listRooms(query) {
   requireDb();
   const result = await socialStore.listRooms({
     kind: query.kind || '',
-    status: query.status === 'all' ? '' : query.status || 'live',
+    // `''` is the dashboard's "All" — an empty filter must not silently
+    // fall back to live-only results.
+    status: query.status === 'all' || query.status === '' ? '' : query.status || 'live',
     adult: null,
     page: query.page,
     size: query.size,
@@ -576,6 +597,324 @@ async function settlePayout(admin, id, patch = {}) {
   return { entry };
 }
 
+// ── Supervision: everything one account touches ─────────────────────────────
+
+/**
+ * The owner's supervision surface — one account and every row it owns, in a
+ * single round trip:
+ *
+ *   profile + photos → posts (all statuses, paid and adult included),
+ *   comments, likes, follows both ways, subscriptions bought and sold plus
+ *   this account's own offer, every charge as buyer and as payee, wallet and
+ *   its entries, live session count, passport stamps, rooms hosted and the
+ *   live room roster.
+ *
+ * Reads stay on the primary: an admin inspecting a live account must never
+ * be shown replica lag. Nothing here is filtered for privacy — that is the
+ * point of the screen — but every call is logged in `audit_log`.
+ */
+async function accountDetail(admin, id) {
+  requireDb();
+  const uid = Number(id);
+  const account = await mariaStore.getUser(uid);
+  if (!account) throw new AuthError('not-found', 'That account does not exist.', 404);
+
+  const [
+    posts,
+    comments,
+    likes,
+    following,
+    followers,
+    subsBought,
+    subsSold,
+    offer,
+    chargesBought,
+    chargesEarned,
+    wallet,
+    walletEntries,
+    sessions,
+    stamps,
+    roomsHosted,
+    liveRooms,
+  ] = await Promise.all([
+    socialStore.listPosts({ creatorId: uid, adult: true, status: 'all', page: 1, size: 50 }),
+    mariaStore.query(
+      `SELECT id, post_id, body, status, created_at
+         FROM post_comments WHERE account_id = ? ORDER BY id DESC LIMIT 100`,
+      [uid],
+    ),
+    mariaStore.query(
+      `SELECT post_id, created_at FROM post_likes
+        WHERE account_id = ? ORDER BY created_at DESC LIMIT 100`,
+      [uid],
+    ),
+    mariaStore.query(
+      `SELECT f.creator_id AS id, a.username, f.created_at
+         FROM follows f JOIN accounts a ON a.id = f.creator_id
+        WHERE f.follower_id = ? ORDER BY f.created_at DESC LIMIT 100`,
+      [uid],
+    ),
+    mariaStore.query(
+      `SELECT f.follower_id AS id, a.username, f.created_at
+         FROM follows f JOIN accounts a ON a.id = f.follower_id
+        WHERE f.creator_id = ? ORDER BY f.created_at DESC LIMIT 100`,
+      [uid],
+    ),
+    mariaStore.query(
+      `SELECT s.*, a.username AS other_username
+         FROM subscriptions s JOIN accounts a ON a.id = s.creator_id
+        WHERE s.subscriber_id = ? ORDER BY s.id DESC LIMIT 50`,
+      [uid],
+    ),
+    mariaStore.query(
+      `SELECT s.*, a.username AS other_username
+         FROM subscriptions s JOIN accounts a ON a.id = s.subscriber_id
+        WHERE s.creator_id = ? ORDER BY s.id DESC LIMIT 50`,
+      [uid],
+    ),
+    socialStore.getCreatorSub(uid),
+    mariaStore.query(
+      'SELECT * FROM charges WHERE buyer_account_id = ? ORDER BY id DESC LIMIT 100',
+      [uid],
+    ),
+    mariaStore.query(
+      'SELECT * FROM charges WHERE payee_account_id = ? ORDER BY id DESC LIMIT 100',
+      [uid],
+    ),
+    socialStore.getWallet(uid),
+    socialStore.listWalletEntries({ accountId: uid, page: 1, size: 50 }),
+    mariaStore.query(
+      `SELECT COUNT(*) AS live, MAX(expires_at) AS latest, MIN(created_at) AS first
+         FROM account_sessions WHERE account_id = ?`,
+      [uid],
+    ),
+    mariaStore.query(
+      `SELECT country, count, last_at FROM passport_stamps
+        WHERE account_id = ? ORDER BY last_at DESC LIMIT 60`,
+      [uid],
+    ),
+    mariaStore.query(
+      `SELECT id, slug, title, kind, price, currency, is_adult, max_participants,
+              status, created_at, ended_at
+         FROM rooms WHERE host_account_id = ? ORDER BY id DESC LIMIT 50`,
+      [uid],
+    ),
+    mariaStore.query(
+      `SELECT slug, sid, country, at FROM rt_roomlive
+        WHERE account_id = ? ORDER BY at DESC LIMIT 50`,
+      [uid],
+    ),
+  ]);
+
+  audit(admin, 'account.inspect', `#${uid} @${account.username}`);
+
+  const photo = (kind) =>
+    account[kind === 'banner' ? 'bannerKey' : 'avatarKey']
+      ? `/api/profile/${encodeURIComponent(account.username)}/photo/${kind}`
+      : null;
+
+  return {
+    account: {
+      ...account,
+      avatarUrl: photo('avatar'),
+      bannerUrl: photo('banner'),
+      // Counts the list screen never carries — the shape of "how much is
+      // going on here" without opening five tabs.
+      stats: {
+        posts: posts.total || 0,
+        comments: comments.length,
+        likes: likes.length,
+        following: following.length,
+        followers: followers.length,
+        subsBought: subsBought.length,
+        subsSold: subsSold.length,
+        chargesBought: chargesBought.length,
+        chargesEarned: chargesEarned.length,
+        sessions: Number(sessions[0]?.live) || 0,
+        roomsHosted: roomsHosted.length,
+      },
+    },
+    posts: posts.items,
+    comments: comments.map((row) => ({
+      id: Number(row.id),
+      postId: Number(row.post_id),
+      body: row.body,
+      status: row.status,
+      createdAt: row.created_at,
+    })),
+    likes: likes.map((row) => ({ postId: Number(row.post_id), createdAt: row.created_at })),
+    following: following.map((row) => ({
+      id: Number(row.id),
+      username: row.username,
+      createdAt: row.created_at,
+    })),
+    followers: followers.map((row) => ({
+      id: Number(row.id),
+      username: row.username,
+      createdAt: row.created_at,
+    })),
+    subscriptions: {
+      bought: subsBought.map(mapSubscription),
+      sold: subsSold.map(mapSubscription),
+      offer,
+    },
+    charges: {
+      bought: chargesBought.map((row) => socialStore.mapCharge(row)),
+      earned: chargesEarned.map((row) => socialStore.mapCharge(row)),
+    },
+    wallet,
+    walletEntries: walletEntries.items,
+    sessions: {
+      live: Number(sessions[0]?.live) || 0,
+      latest: sessions[0]?.latest || null,
+      first: sessions[0]?.first || null,
+    },
+    stamps: stamps.map((row) => ({
+      country: row.country,
+      count: Number(row.count),
+      lastAt: row.last_at,
+    })),
+    rooms: {
+      hosted: roomsHosted.map((row) => ({
+        id: Number(row.id),
+        slug: row.slug,
+        title: row.title,
+        kind: row.kind,
+        price: Number(row.price) || 0,
+        currency: row.currency || 'KES',
+        isAdult: Boolean(row.is_adult),
+        maxParticipants: Number(row.max_participants) || 6,
+        status: row.status,
+        createdAt: row.created_at,
+        endedAt: row.ended_at,
+      })),
+      live: liveRooms.map((row) => ({
+        slug: row.slug,
+        sid: row.sid,
+        country: row.country,
+        at: Number(row.at) || 0,
+      })),
+    },
+  };
+}
+
+/**
+ * One post in full: the row, every comment (including the removed ones —
+ * moderation needs to see what was taken down and why), and who paid for it.
+ * The media URL points at the admin-only stream, so a paid or 18+ post is
+ * fully reviewable without buying it or passing the age gate.
+ */
+async function postDetail(admin, id) {
+  requireDb();
+  const post = await socialStore.getPost(Number(id), { withCountry: true });
+  if (!post) throw new AuthError('not-found', 'That post no longer exists.', 404);
+
+  const [comments, purchases] = await Promise.all([
+    mariaStore.query(
+      `SELECT id, post_id, account_id, username, body, status, created_at
+         FROM post_comments WHERE post_id = ? ORDER BY id ASC LIMIT 200`,
+      [Number(id)],
+    ),
+    mariaStore.query(
+      `SELECT id, buyer_account_id, buyer_username, amount, status, paid_at, created_at
+         FROM charges WHERE purpose = 'post' AND ref_id = ?
+        ORDER BY id DESC LIMIT 100`,
+      [Number(id)],
+    ),
+  ]);
+
+  return {
+    post: {
+      ...post,
+      mediaUrl: post.mediaKey ? `/api/admin/posts/${post.id}/media` : null,
+    },
+    comments: comments.map((row) => ({
+      id: Number(row.id),
+      postId: Number(row.post_id),
+      accountId: Number(row.account_id),
+      username: row.username,
+      body: row.body,
+      status: row.status,
+      createdAt: row.created_at,
+    })),
+    purchases: purchases.map((row) => ({
+      id: Number(row.id),
+      buyerId: Number(row.buyer_account_id),
+      buyer: row.buyer_username,
+      amount: Number(row.amount),
+      status: row.status,
+      paidAt: row.paid_at,
+      createdAt: row.created_at,
+    })),
+  };
+}
+
+/**
+ * Stream a post's media straight to the dashboard, past the paywall and the
+ * 18+ gate. This is the supervision exception: the owner is entitled to see
+ * everything hosted on the platform, and the audit row records every paid or
+ * adult file opened this way.
+ */
+async function readPostMedia(admin, id, res) {
+  requireDb();
+  const post = await socialStore.getPost(Number(id), { withCountry: false });
+  if (!post || !post.mediaKey) throw new AuthError('not-found', 'That post has no media.', 404);
+  const stored = await commerce.readMediaBytes(post.mediaKey);
+  if (!stored) throw new AuthError('not-found', 'That file is missing.', 404);
+  if (post.price > 0 || post.isAdult) {
+    audit(admin, 'post.media.view', `#${post.id} @${post.creatorName}`, {
+      price: post.price,
+      isAdult: post.isAdult,
+    });
+  }
+  return commerce.sendMedia(res, stored.data, stored.type, 'private, max-age=60');
+}
+
+/** One room in full: the row, who is inside right now, and who paid to get in. */
+async function roomDetail(admin, id) {
+  requireDb();
+  const room = await socialStore.getRoomById(Number(id));
+  if (!room) throw new AuthError('not-found', 'That room no longer exists.', 404);
+
+  const [participants, purchases, roster] = await Promise.all([
+    mariaStore.query(
+      `SELECT sid, username, country, at FROM rt_roomlive
+        WHERE slug = ? ORDER BY at DESC LIMIT 50`,
+      [room.slug],
+    ),
+    mariaStore.query(
+      `SELECT id, buyer_account_id, buyer_username, amount, status, paid_at, created_at
+         FROM charges WHERE purpose = 'room' AND ref_id = ?
+        ORDER BY id DESC LIMIT 100`,
+      [Number(room.id)],
+    ),
+    mariaStore.query(
+      `SELECT DISTINCT sid FROM rt_roomlive WHERE slug = ? LIMIT 100`,
+      [room.slug],
+    ),
+  ]);
+
+  return {
+    room,
+    participants: participants.map((row) => ({
+      sid: row.sid,
+      username: row.username,
+      country: row.country,
+      at: Number(row.at) || 0,
+    })),
+    headcount: roster.length,
+    purchases: purchases.map((row) => ({
+      id: Number(row.id),
+      buyerId: Number(row.buyer_account_id),
+      buyer: row.buyer_username,
+      amount: Number(row.amount),
+      status: row.status,
+      paidAt: row.paid_at,
+      createdAt: row.created_at,
+    })),
+  };
+}
+
 module.exports = {
   AuthError,
   init,
@@ -598,6 +937,10 @@ module.exports = {
   // Social platform
   listPosts,
   moderatePost,
+  accountDetail,
+  postDetail,
+  readPostMedia,
+  roomDetail,
   listCharges,
   reviewCharge,
   listRooms,

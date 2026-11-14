@@ -1,29 +1,39 @@
 /**
- * Settings — account facts, the 18+ acknowledgement, how money works here,
- * and the session.
+ * Settings — profile photos, account facts, the 18+ acknowledgement, how
+ * money works here, and the session.
  *
- * Everything on this screen is read-only apart from two actions (the
- * acknowledgement and sign-out): profile editing lives in the video app's
- * lobby, and there is deliberately no "un-acknowledge" API — the flag only
- * ever says *this device* has been told, so the card reflects that state and
- * stops there.
+ * The photo card is the one screen that writes: a profile picture and a
+ * background photo are what other people actually see, so they belong to the
+ * account rather than to the video lobby. Everything else here is read-only
+ * apart from two actions (the acknowledgement and sign-out): profile editing
+ * lives in the video app's lobby, and there is deliberately no
+ * "un-acknowledge" API — the flag only ever says *this device* has been told,
+ * so the card reflects that state and stops there.
  */
-import { useState, type ReactNode } from 'react';
+import { useRef, useState, type ReactNode } from 'react';
 import type { PageProps } from '../shell/pageProps';
 import { signOutAccount } from '../lib/auth';
 import { Link, navigate } from '../lib/router';
-import { formatKes } from '../lib/social';
+import { formatKes, removePhoto, SocialError, uploadPhoto, type PhotoKind } from '../lib/social';
 import { countryName } from '../lib/countries';
+import { mediaSrc } from '../lib/mediaUrl';
+import Avatar from '../components/Avatar';
 import {
+  CamIcon,
   CheckIcon,
   CompassIcon,
   FlameIcon,
   GlobeIcon,
   LockIcon,
   PlusIcon,
+  SpinnerIcon,
   VideoIcon,
   WalletIcon,
 } from '../components/icons';
+
+/** Photos are validated server-side too — this just fails faster in the UI. */
+const PHOTO_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
+const PHOTO_MAX_BYTES = 4 * 1024 * 1024;
 
 export default function SettingsPage({
   account,
@@ -35,6 +45,13 @@ export default function SettingsPage({
 }: PageProps) {
   const [signingOut, setSigningOut] = useState(false);
 
+  // Profile photos — one shared busy flag so avatar and banner cannot be
+  // swapped while the other request is still in flight.
+  const [photoBusy, setPhotoBusy] = useState<PhotoKind | null>(null);
+  const [photoError, setPhotoError] = useState<string | null>(null);
+  const avatarInput = useRef<HTMLInputElement>(null);
+  const bannerInput = useRef<HTMLInputElement>(null);
+
   const commerce = config.commerce;
   const age = Number(account?.profile?.age);
   const canAck = Boolean(commerce.adult && account && age >= 18 && !adultOk);
@@ -45,6 +62,56 @@ export default function SettingsPage({
     await signOutAccount();
     onAccountChange(null);
     navigate('/');
+  }
+
+  async function pickPhoto(kind: PhotoKind, file: File | undefined): Promise<void> {
+    if (!file || !account) return;
+    setPhotoError(null);
+    if (!PHOTO_TYPES.includes(file.type)) {
+      setPhotoError('Choose a JPEG, PNG, WebP or GIF image.');
+      return;
+    }
+    if (file.size > PHOTO_MAX_BYTES) {
+      setPhotoError('That photo is over 4 MB — pick a smaller one.');
+      return;
+    }
+    setPhotoBusy(kind);
+    try {
+      const { url } = await uploadPhoto(kind, file);
+      // The account object is the only place these URLs live; patching it
+      // makes every avatar on the site (including this page's) refresh at once.
+      onAccountChange({
+        ...account,
+        ...(kind === 'avatar' ? { avatarUrl: url } : { bannerUrl: url }),
+      });
+    } catch (err) {
+      setPhotoError(
+        err instanceof SocialError ? err.message : 'That upload did not go through — try again.',
+      );
+    } finally {
+      setPhotoBusy(null);
+      const input = kind === 'avatar' ? avatarInput : bannerInput;
+      if (input.current) input.current.value = '';
+    }
+  }
+
+  async function clearPhoto(kind: PhotoKind): Promise<void> {
+    if (!account || photoBusy) return;
+    setPhotoError(null);
+    setPhotoBusy(kind);
+    try {
+      await removePhoto(kind);
+      onAccountChange({
+        ...account,
+        ...(kind === 'avatar' ? { avatarUrl: null } : { bannerUrl: null }),
+      });
+    } catch (err) {
+      setPhotoError(
+        err instanceof SocialError ? err.message : 'Could not remove that photo — try again.',
+      );
+    } finally {
+      setPhotoBusy(null);
+    }
   }
 
   return (
@@ -70,9 +137,12 @@ export default function SettingsPage({
         ) : (
           <>
             <div className="mt-3 flex items-center gap-3">
-              <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-accent/20 text-base font-bold text-accent">
-                {account.username.slice(0, 1).toUpperCase()}
-              </span>
+              <Avatar
+                username={account.username}
+                src={account.avatarUrl}
+                className="h-11 w-11"
+                letterClass="text-base"
+              />
               <div className="min-w-0">
                 <p className="truncate text-sm font-semibold text-ink">@{account.username}</p>
                 <p className="truncate text-xs text-muted">
@@ -96,6 +166,135 @@ export default function SettingsPage({
             <p className="mt-4 text-xs leading-relaxed text-muted">
               These details were set in the video app's lobby — that is where you change them.
             </p>
+          </>
+        )}
+      </section>
+
+      {/* ── Profile photos ──────────────────────────────────────────────── */}
+      <section className="card p-5">
+        <div className="flex items-center gap-2">
+          <span className="flex h-8 w-8 items-center justify-center rounded-xl border border-white/10 bg-surface-2 text-accent">
+            <CamIcon className="h-4 w-4" />
+          </span>
+          <h2 className="text-base font-semibold text-ink">Profile photos</h2>
+        </div>
+
+        {!account ? (
+          <p className="mt-2 text-sm leading-relaxed text-muted">
+            Sign in to add a profile picture and a background — these are what other people see
+            on your profile and next to everything you post.
+          </p>
+        ) : (
+          <>
+            <p className="mt-2 text-sm leading-relaxed text-muted">
+              Your picture shows on your profile, your posts and your comments. The background
+              sits behind your name on your profile page. JPEG, PNG, WebP or GIF, up to 4 MB.
+            </p>
+
+            <div className="mt-4 grid gap-4 sm:grid-cols-2">
+              {/* Picture */}
+              <div className="rounded-xl border border-white/10 bg-surface-2/60 p-3.5">
+                <p className="text-xs font-semibold uppercase tracking-wide text-muted">
+                  Profile picture
+                </p>
+                <div className="mt-2.5 flex items-center gap-3">
+                  <Avatar
+                    username={account.username}
+                    src={account.avatarUrl}
+                    className="h-14 w-14"
+                    letterClass="text-xl"
+                  />
+                  <div className="flex min-w-0 flex-col gap-1.5">
+                    <button
+                      type="button"
+                      className="btn btn-ghost px-3 py-1.5 text-xs"
+                      disabled={photoBusy !== null}
+                      onClick={() => avatarInput.current?.click()}
+                    >
+                      {photoBusy === 'avatar' ? 'Uploading…' : account.avatarUrl ? 'Replace' : 'Upload'}
+                    </button>
+                    {account.avatarUrl ? (
+                      <button
+                        type="button"
+                        className="btn btn-ghost px-3 py-1.5 text-xs text-danger"
+                        disabled={photoBusy !== null}
+                        onClick={() => clearPhoto('avatar')}
+                      >
+                        Remove
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+                <input
+                  ref={avatarInput}
+                  type="file"
+                  accept="image/*"
+                  className="hidden"
+                  aria-label="Choose a profile picture"
+                  onChange={(event) => pickPhoto('avatar', event.target.files?.[0])}
+                />
+              </div>
+
+              {/* Background */}
+              <div className="rounded-xl border border-white/10 bg-surface-2/60 p-3.5">
+                <p className="text-xs font-semibold uppercase tracking-wide text-muted">
+                  Background photo
+                </p>
+                <div
+                  className="mt-2.5 h-14 w-full overflow-hidden rounded-lg border border-white/10 bg-cover bg-center"
+                  style={{
+                    backgroundImage: account.bannerUrl
+                      ? `url("${mediaSrc(account.bannerUrl)}")`
+                      : 'linear-gradient(120deg, rgba(255,255,255,.06), rgba(255,255,255,.02))',
+                  }}
+                  aria-hidden="true"
+                />
+                <div className="mt-2.5 flex gap-1.5">
+                  <button
+                    type="button"
+                    className="btn btn-ghost px-3 py-1.5 text-xs"
+                    disabled={photoBusy !== null}
+                    onClick={() => bannerInput.current?.click()}
+                  >
+                    {photoBusy === 'banner'
+                      ? 'Uploading…'
+                      : account.bannerUrl
+                        ? 'Replace'
+                        : 'Upload'}
+                  </button>
+                  {account.bannerUrl ? (
+                    <button
+                      type="button"
+                      className="btn btn-ghost px-3 py-1.5 text-xs text-danger"
+                      disabled={photoBusy !== null}
+                      onClick={() => clearPhoto('banner')}
+                    >
+                      Remove
+                    </button>
+                  ) : null}
+                </div>
+                <input
+                  ref={bannerInput}
+                  type="file"
+                  accept="image/*"
+                  className="hidden"
+                  aria-label="Choose a background photo"
+                  onChange={(event) => pickPhoto('banner', event.target.files?.[0])}
+                />
+              </div>
+            </div>
+
+            {photoBusy ? (
+              <p className="mt-3 flex items-center gap-2 text-xs text-muted">
+                <SpinnerIcon className="h-3.5 w-3.5 animate-spin" />
+                Saving your photo…
+              </p>
+            ) : null}
+            {photoError ? (
+              <p className="mt-3 rounded-xl border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">
+                {photoError}
+              </p>
+            ) : null}
           </>
         )}
       </section>

@@ -25,6 +25,7 @@ import { signOutAccount } from '../lib/auth';
 import { Link, navigate } from '../lib/router';
 import { mediaSrc } from '../lib/mediaUrl';
 import MediaImg from '../components/MediaImg';
+import Avatar from '../components/Avatar';
 import {
   AlertIcon,
   CamIcon,
@@ -231,23 +232,42 @@ export default function ProfilePage({
       )}
 
       {/* ── Identity ────────────────────────────────────────────────────── */}
-      <div className="card p-5">
-        <div className="flex items-center gap-4">
-          <span className="relative block h-14 w-14 shrink-0">
-            <span className="flex h-14 w-14 items-center justify-center rounded-full bg-accent/20 text-xl font-black text-accent">
-              {account.username.slice(0, 1).toUpperCase()}
-            </span>
-            <span className="absolute -bottom-1 -right-1 text-lg leading-none">
-              {flagFromCountry(account.profile?.country ?? 'KE')}
-            </span>
-          </span>
-          <div className="min-w-0">
-            <p className="truncate text-sm font-semibold text-ink">
-              {account.profile?.age ?? '—'} years old
-              {gender ? ` · ${gender}` : ''}
-            </p>
-            {since && <p className="text-xs text-muted">Member since {since}</p>}
-            {creator && (
+      <div className="card overflow-hidden p-0">
+        {/* The background photo is the first thing anyone else sees — it sits
+            above the card's content and is absent until one is uploaded. */}
+        <div
+          className="h-28 w-full bg-cover bg-center"
+          style={{
+            backgroundImage: account.bannerUrl
+              ? `url("${mediaSrc(account.bannerUrl)}")`
+              : 'linear-gradient(120deg, rgba(109,153,255,.22), rgba(106,59,216,.18))',
+          }}
+          aria-hidden="true"
+        />
+        <div className="p-5">
+          <div className="flex items-center gap-4">
+            <Avatar
+              username={account.username}
+              src={account.avatarUrl}
+              className="-mt-11 h-14 w-14 ring-4 ring-[#10121c]"
+              letterClass="text-xl"
+            >
+              <span className="text-lg leading-none">
+                {flagFromCountry(account.profile?.country ?? 'KE')}
+              </span>
+            </Avatar>
+            <div className="min-w-0">
+              <p className="truncate text-sm font-semibold text-ink">
+                {account.profile?.age ?? '—'} years old
+                {gender ? ` · ${gender}` : ''}
+              </p>
+              {since && <p className="text-xs text-muted">Member since {since}</p>}
+              <p className="mt-1 text-xs text-muted">
+                <Link to="/settings" className="text-accent hover:underline">
+                  Change your photos
+                </Link>
+              </p>
+              {creator && (
               <p className="mt-1 text-xs text-muted">
                 <span className="font-semibold text-ink">{creator.followers}</span> followers
                 {creator.subscription.enabled && (
@@ -271,6 +291,7 @@ export default function ProfilePage({
             I&apos;m 18 or over — show adult posts
           </button>
         )}
+        </div>
       </div>
 
       {/* ── Creator stats ───────────────────────────────────────────────── */}

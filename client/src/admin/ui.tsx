@@ -126,6 +126,57 @@ export function Loading({ what }: { what: string }) {
 }
 
 /**
+ * Full-screen modal with a close button. Used by the supervision inspectors
+ * (account, post, room) so an owner can review everything about one entity
+ * without leaving the tab they are on.
+ */
+export function Modal({
+  title,
+  subtitle,
+  onClose,
+  children,
+  wide = false,
+}: {
+  title: string;
+  subtitle?: ReactNode;
+  onClose: () => void;
+  children: ReactNode;
+  /** `true` for dense data tables; default is a comfortable single column. */
+  wide?: boolean;
+}) {
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-end justify-center bg-black/70 p-3 backdrop-blur-sm sm:items-center sm:p-6"
+      role="dialog"
+      aria-modal="true"
+      aria-label={title}
+      onClick={onClose}
+    >
+      <div
+        className={`card flex max-h-[92vh] w-full flex-col overflow-hidden ${wide ? 'max-w-4xl' : 'max-w-2xl'}`}
+        onClick={(event) => event.stopPropagation()}
+      >
+        <header className="flex items-start justify-between gap-3 border-b border-white/10 px-5 py-4">
+          <div className="min-w-0">
+            <h2 className="truncate text-sm font-semibold text-ink">{title}</h2>
+            {subtitle && <p className="mt-0.5 text-xs text-muted">{subtitle}</p>}
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close"
+            className="shrink-0 rounded-lg p-1.5 text-muted transition-colors hover:bg-white/5 hover:text-ink"
+          >
+            ✕
+          </button>
+        </header>
+        <div className="overflow-y-auto px-5 py-4">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+/**
  * Toggle row used by Settings. The whole row is the switch (one target, one
  * tab stop) and `danger` turns it red — maintenance mode pauses matchmaking
  * for everyone, so it must never look like the other three switches.

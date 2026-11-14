@@ -26,6 +26,7 @@ import {
 import { Link, navigate } from '../lib/router';
 import { mediaSrc } from '../lib/mediaUrl';
 import MediaImg from '../components/MediaImg';
+import Avatar from '../components/Avatar';
 import PaySheet from '../components/PaySheet';
 import CreatorActions from '../components/CreatorActions';
 import {
@@ -268,14 +269,14 @@ export default function PostDetailPage({
 
       <div className="card p-4">
         <div className="flex items-center gap-3">
-          <span className="relative block h-10 w-10 shrink-0">
-            <span className="flex h-10 w-10 items-center justify-center rounded-full bg-accent/20 text-base font-bold text-accent">
-              {post.creatorName.slice(0, 1).toUpperCase()}
-            </span>
-            <span className="absolute -bottom-1 -right-1 text-xs leading-none">
-              {flagFromCountry(post.creatorCountry)}
-            </span>
-          </span>
+          <Avatar
+            username={post.creatorName}
+            src={post.creatorAvatarUrl}
+            className="h-10 w-10"
+            letterClass="text-base"
+          >
+            <span className="text-xs leading-none">{flagFromCountry(post.creatorCountry)}</span>
+          </Avatar>
           <div className="min-w-0 flex-1">
             <Link
               to={`/creator/${post.creatorId}`}
@@ -509,9 +510,12 @@ export default function PostDetailPage({
           ) : (
             comments.map((comment) => (
               <div key={comment.id} className="flex gap-3">
-                <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-accent/15 text-[11px] font-bold text-accent">
-                  {comment.username.slice(0, 1).toUpperCase()}
-                </span>
+                <Avatar
+                  username={comment.username}
+                  src={comment.avatarUrl}
+                  className="h-7 w-7"
+                  letterClass="text-[11px]"
+                />
                 <div className="min-w-0 flex-1">
                   <p className="text-xs">
                     <span className="font-semibold text-ink">@{comment.username}</span>{' '}

@@ -15,6 +15,7 @@ import { SocialError, formatKes, likePost, listPosts, timeAgo } from '../lib/soc
 import { Link, navigate } from '../lib/router';
 import { mediaSrc } from '../lib/mediaUrl';
 import MediaImg from '../components/MediaImg';
+import Avatar from '../components/Avatar';
 import CreatorActions from '../components/CreatorActions';
 import {
   CommentIcon,
@@ -395,14 +396,14 @@ function ExploreCard({ post, account, config, requireAuth, onLike }: CardProps) 
       onClick={() => navigate(`/post/${post.id}`)}
     >
       <div className="flex items-center gap-3 px-4 pt-4">
-        <span className="relative block h-8 w-8 shrink-0">
-          <span className="flex h-8 w-8 items-center justify-center rounded-full bg-gradient-to-br from-accent/40 to-accent-2/40 ring-2 ring-accent/30 text-xs font-bold text-ink">
-            {post.creatorName.slice(0, 1).toUpperCase()}
-          </span>
-          <span className="absolute -bottom-1 -right-1 text-[11px] leading-none">
-            {flagFromCountry(post.creatorCountry)}
-          </span>
-        </span>
+        <Avatar
+          username={post.creatorName}
+          src={post.creatorAvatarUrl}
+          className="h-8 w-8 ring-2 ring-accent/30"
+          letterClass="text-xs"
+        >
+          <span className="text-[11px] leading-none">{flagFromCountry(post.creatorCountry)}</span>
+        </Avatar>
         <div className="min-w-0 flex-1">
           <Link
             to={`/creator/${post.creatorId}`}

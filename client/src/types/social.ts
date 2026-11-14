@@ -13,6 +13,8 @@ export interface Post {
   creatorCountry: string;
   /** Banned creators are hidden from the action row; the server refuses too. */
   creatorBanned?: boolean;
+  /** The creator's photo, or null so the UI falls back to their first letter. */
+  creatorAvatarUrl?: string | null;
   /** Viewer-specific follow state, annotated by the feed/detail endpoints. */
   creatorFollowing?: boolean;
   creatorSubscribed?: boolean;
@@ -41,6 +43,8 @@ export interface Comment {
   id: number;
   postId: number;
   username: string;
+  /** The commenter's photo, or null so the UI falls back to a letter. */
+  avatarUrl?: string | null;
   body: string;
   status: string;
   createdAt: string;
@@ -187,6 +191,9 @@ export interface Creator {
   username: string;
   country: string;
   banned: boolean;
+  /** Public profile photos, or null when the creator has not set one. */
+  avatarUrl?: string | null;
+  bannerUrl?: string | null;
   createdAt: string;
   followers: number;
   following: number;

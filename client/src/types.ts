@@ -35,6 +35,9 @@ export interface AccountUser {
   createdAt?: string | null;
   /** Premium entitlement: ISO timestamp of when it runs out, or null. */
   premiumUntil?: string | null;
+  /** Profile photo paths on the API host — null until one is uploaded. */
+  avatarUrl?: string | null;
+  bannerUrl?: string | null;
 }
 
 /**

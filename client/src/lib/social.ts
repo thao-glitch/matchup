@@ -342,6 +342,56 @@ export function getRoom(slug: string): Promise<RoomAccess> {
   return request<RoomAccess>(`/rooms/${encodeURIComponent(slug)}`);
 }
 
+// ── Profile photos ───────────────────────────────────────────────────────────
+
+export type PhotoKind = 'avatar' | 'banner';
+
+/**
+ * Upload one profile photo (raw bytes, not JSON — same reason post media is
+ * raw). The server proxies it because a photo is a few hundred KB, well
+ * inside the function body limit, and one endpoint keeps the validation in
+ * one place.
+ */
+export async function uploadPhoto(kind: PhotoKind, file: File): Promise<{ url: string }> {
+  let res: Response;
+  try {
+    res = await fetch(`${BASE}/me/photo?kind=${kind}`, {
+      method: 'POST',
+      headers: {
+        accept: 'application/json',
+        'content-type': file.type || 'application/octet-stream',
+        ...(getToken() ? { authorization: `Bearer ${getToken()}` } : {}),
+      },
+      body: file,
+      cache: 'no-store',
+    });
+  } catch {
+    throw new SocialError('Could not reach the server — check your connection.', 'network');
+  }
+  const text = await res.text();
+  let data: { error?: { code?: string; message?: string }; url?: string } | null = null;
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      /* non-JSON body — the status line carries the failure */
+    }
+  }
+  if (!res.ok) {
+    throw new SocialError(
+      data?.error?.message ?? `Upload failed (${res.status}).`,
+      data?.error?.code ?? 'http',
+      res.status,
+    );
+  }
+  return { url: data?.url ?? '' };
+}
+
+/** Drop the photo; the old file is deleted server-side in the same call. */
+export function removePhoto(kind: PhotoKind): Promise<{ removed: boolean }> {
+  return request<{ removed: boolean }>(`/me/photo?kind=${kind}`, { method: 'DELETE' });
+}
+
 // ── Shared helpers ───────────────────────────────────────────────────────────
 
 const KES_FMT = new Intl.NumberFormat('en-KE', {

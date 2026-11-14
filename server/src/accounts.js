@@ -103,18 +103,34 @@ function normalizeCredentials(rawUsername, rawPassword) {
 }
 
 function toUser(account) {
+  const username = account.username;
   return {
     // Internal row id — the key the passport sync is stored under. Not a
     // secret (sessions are keyed by bearer-token hashes) and never used to
     // authorize anything on its own.
     id: account.id,
-    username: account.username,
+    username,
     profile: account.profile,
     createdAt: account.createdAt ? new Date(account.createdAt).toISOString() : null,
     // Paybill entitlement: ISO timestamp or null. Purely informational for
     // the client — the server is what decides whether premium applies.
     premiumUntil: account.premiumUntil ? new Date(account.premiumUntil).toISOString() : null,
+    // Profile photos are public assets served by the app (never the object
+    // store directly), so a missing photo is a plain null the UI renders as
+    // the username's first letter.
+    avatarUrl: account.avatarKey ? photoUrl(username, 'avatar') : null,
+    bannerUrl: account.bannerKey ? photoUrl(username, 'banner') : null,
+    // The raw keys are only used by the photo routes to delete a replaced
+    // file; clients are handed the URLs above and never the storage path.
+    avatarKey: account.avatarKey || null,
+    bannerKey: account.bannerKey || null,
   };
+}
+
+/** Public URL for one profile photo — shared by the account, creator and
+ * admin surfaces so every avatar on the site resolves the same way. */
+function photoUrl(username, kind) {
+  return `/api/profile/${encodeURIComponent(String(username || ''))}/photo/${kind === 'banner' ? 'banner' : 'avatar'}`;
 }
 
 // ── Storage helpers (both backends return the same shapes) ──────────────────
@@ -406,6 +422,7 @@ async function logout(token) {
 
 module.exports = {
   AuthError,
+  photoUrl,
   init,
   register,
   login,

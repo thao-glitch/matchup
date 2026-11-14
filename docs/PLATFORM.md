@@ -167,6 +167,19 @@ interface Post {
 interface Comment { id: number; postId: number; username: string; body: string; status: string; createdAt: string; }
 ```
 
+### Profile photos (avatar + background)
+| Method | Path | Body | → |
+| --- | --- | --- | --- |
+| GET | `/api/profile/:username/photo/:kind` | | the raw image (public, `Cache-Control: public, max-age=3600`); 404 when unset |
+| POST | `/api/me/photo?kind=avatar\|banner` | raw bytes (`image/jpeg|png|webp|gif`, ≤ 4 MB) | 201 `{ kind, url }` — replaces the old file |
+| DELETE | `/api/me/photo?kind=avatar\|banner` | | `{ removed: true }` — bytes deleted from Blob/DB/disk |
+
+Uploads are proxied through the function (not direct-to-Blob) — a photo is a
+few hundred KB. `accounts.avatar_key` / `accounts.banner_key` hold the
+storage keys; `media_blobs` keeps the fallback copy when Blob is not
+configured, and the daily lifecycle sweep never touches a key still referenced
+by an account.
+
 ### Creators (follow + subscribe)
 | Method | Path | Body | → |
 | --- | --- | --- | --- |
@@ -256,10 +269,14 @@ for compatibility but the relay needs no offer/answer handshake.
 | GET | `/api/admin/db` | MariaDB version, exact data/index sizes, table estimates, connection headroom, pool and replica state |
 | POST | `/api/admin/media/prune?dryRun=1` | object-storage/legacy-media lifecycle sweep; dry run reports without deleting |
 | GET | `/api/admin/posts?status=&q=&page=&size=` | `{ items, total, page, size }` |
+| GET | `/api/admin/posts/:id` | the post, every comment (incl. removed), and every buyer |
+| GET | `/api/admin/posts/:id/media` | the raw file past the paywall + 18+ gate — audited when paid/adult |
 | PATCH | `/api/admin/posts/:id` | `{ status: 'active'\|'hidden'\|'removed' }` |
+| GET | `/api/admin/accounts/:id` | everything one account touches — profile + photos, posts, comments, likes, follows, subscriptions bought/sold, charges as buyer/payee, wallet + entries, session count, stamps, rooms hosted + live roster |
 | GET | `/api/admin/charges?status=&page=&size=` | ledger of all new payments |
 | PATCH | `/api/admin/charges/:id` | `{ status: 'paid'\|'failed', note? }` — approving settles the wallet (manual mode) |
-| GET | `/api/admin/rooms?status=` | `{ items }` |
+| GET | `/api/admin/rooms?status=` | `{ items }` — `''` / `all` = every status |
+| GET | `/api/admin/rooms/:id` | the room, its live roster (`rt_roomlive`) and its takings |
 | PATCH | `/api/admin/rooms/:id` | `{ status: 'live'\|'ended' }` — ending a room closes it live |
 | GET | `/api/admin/earnings` | `{ gross, commission, net, paid, pending, failed, byDay: [{day,count,gross,commission}], withdrawals: [{id,username,amount,phone,status,createdAt}] }` |
 | GET | `/api/admin/wallets` | `{ items: Wallet[] }` |

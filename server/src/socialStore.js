@@ -45,6 +45,8 @@ function mapPost(row) {
     creatorName: row.username,
     creatorCountry: row.country || '',
     creatorBanned: Boolean(row.creator_banned),
+    // The creator's photo on every card — null falls back to the initial.
+    creatorAvatarUrl: row.avatar_key ? photoUrl(row.username, 'avatar') : null,
     type: row.type,
     caption: row.caption || '',
     mediaKey: row.media_key || null,
@@ -59,6 +61,11 @@ function mapPost(row) {
     purchases: Number(row.purchases) || 0,
     createdAt: iso(row.created_at),
   };
+}
+
+/** Public URL for one profile photo — mirrors `accounts.photoUrl`. */
+function photoUrl(username, kind) {
+  return `/api/profile/${encodeURIComponent(String(username || ''))}/photo/${kind === 'banner' ? 'banner' : 'avatar'}`;
 }
 
 function mapCharge(row) {
@@ -139,6 +146,8 @@ function mapComment(row) {
     id: Number(row.id),
     postId: Number(row.post_id),
     username: row.username,
+    // The commenter's photo when they have one — same URL shape as posts.
+    avatarUrl: row.avatar_key ? photoUrl(row.username, 'avatar') : null,
     body: row.body,
     status: row.status,
     createdAt: iso(row.created_at),
@@ -185,7 +194,7 @@ async function insertPost({
 
 async function getPost(id, { withCountry = true } = {}) {
   const rows = await query(
-    `SELECT p.*, ${withCountry ? 'a.country AS country, a.banned_at AS creator_banned,' : ''}
+    `SELECT p.*, ${withCountry ? 'a.country AS country, a.banned_at AS creator_banned, a.avatar_key,' : ''}
             (SELECT COUNT(*) FROM post_likes l WHERE l.post_id = p.id) AS like_count,
             (SELECT COUNT(*) FROM post_comments c WHERE c.post_id = p.id AND c.status = 'active') AS comment_count
        FROM posts p
@@ -248,13 +257,17 @@ async function listPosts({
     params.push(like, like);
   }
 
-  const whereSql = `WHERE ${where.join(' AND ')}`;
+  // An empty `where` is the legitimate "every post, every status" case the
+  // dashboard's All filter asks for — `WHERE` with nothing after it is a
+  // syntax error, not a match-everything clause.
+  const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
   const [countRows] = await read(
     `SELECT COUNT(*) AS total FROM posts p ${whereSql}`,
     params,
   );
   const rows = await read(
     `SELECT p.*, a.country AS country, a.banned_at AS creator_banned,
+            a.avatar_key,
             (SELECT COUNT(*) FROM post_likes l WHERE l.post_id = p.id) AS like_count,
             (SELECT COUNT(*) FROM post_comments c WHERE c.post_id = p.id AND c.status = 'active') AS comment_count
        FROM posts p
@@ -410,7 +423,11 @@ async function likePost(postId, accountId, liked) {
 
 async function listComments(postId, limit = 100, { readReplica = true } = {}) {
   const rows = await (readReplica ? readQuery : query)(
-    `SELECT * FROM post_comments WHERE post_id = ? AND status = 'active' ORDER BY id ASC LIMIT ${Math.min(500, Math.max(1, Number(limit) || 100))}`,
+    `SELECT c.*, a.avatar_key
+       FROM post_comments c
+       LEFT JOIN accounts a ON a.id = c.account_id
+      WHERE c.post_id = ? AND c.status = 'active'
+      ORDER BY c.id ASC LIMIT ${Math.min(500, Math.max(1, Number(limit) || 100))}`,
     [Number(postId)],
   );
   return rows.map(mapComment);
@@ -422,7 +439,12 @@ async function insertComment({ postId, accountId, username, body }) {
     [Number(postId), Number(accountId), username, String(body).slice(0, 500)],
   );
   await query('UPDATE posts SET comments_n = comments_n + 1 WHERE id = ?', [Number(postId)]);
-  const rows = await query('SELECT * FROM post_comments WHERE id = ?', [res.insertId]);
+  const rows = await query(
+    `SELECT c.*, a.avatar_key FROM post_comments c
+       LEFT JOIN accounts a ON a.id = c.account_id
+      WHERE c.id = ?`,
+    [res.insertId],
+  );
   return mapComment(rows[0]);
 }
 
@@ -820,6 +842,7 @@ async function getCreator(creatorId, viewerId = null, { readReplica = false } = 
   if (!Number.isInteger(id) || id <= 0) return null;
   const rows = await (readReplica ? readQuery : query)(
     `SELECT a.id, a.username, a.country, a.created_at, a.banned_at,
+            a.avatar_key, a.banner_key,
             (SELECT COUNT(*) FROM follows f WHERE f.creator_id = a.id) AS followers,
             (SELECT COUNT(*) FROM follows f WHERE f.follower_id = a.id) AS following,
             (SELECT COUNT(*) FROM posts p WHERE p.account_id = a.id AND p.status = 'active') AS posts,
@@ -854,6 +877,10 @@ async function getCreator(creatorId, viewerId = null, { readReplica = false } = 
     username: row.username,
     country: row.country || '',
     banned: Boolean(row.banned_at),
+    // Public photos, same URLs the account surface uses — a creator card in
+    // the feed and the creator page must render the same face.
+    avatarUrl: row.avatar_key ? photoUrl(row.username, 'avatar') : null,
+    bannerUrl: row.banner_key ? photoUrl(row.username, 'banner') : null,
     createdAt: iso(row.created_at),
     followers: Number(row.followers) || 0,
     following: Number(row.following) || 0,

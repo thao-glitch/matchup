@@ -335,6 +335,149 @@ async function postDetail(user, id) {
 }
 
 /**
+ * Read one stored file back: object storage first, then the historical
+ * `media_blobs` row, then the legacy disk file. Returns `null` when nothing
+ * holds the bytes anymore (the caller turns that into a 404).
+ *
+ * Shared by the post paywall and the public profile-photo route so there is
+ * exactly one definition of "where does media live".
+ */
+async function readMediaBytes(rawKey) {
+  const key = path.basename(String(rawKey || ''));
+  if (!safeKey(key)) return null;
+  const mimeFor = (value) =>
+    Object.entries(MEDIA_TYPES).find(([, ext]) => value.endsWith(ext))?.[0] ||
+    'application/octet-stream';
+
+  let data = null;
+  let type = mimeFor(key);
+  try {
+    const stored = await mediaStore.read(key);
+    if (stored?.data) {
+      data = stored.data;
+      type = stored.mime || type;
+    }
+  } catch (err) {
+    console.warn('[commerce] blob read failed:', err.message);
+  }
+
+  if (!data && backend === 'maria') {
+    const blob = await mariaStore.getMediaBlob(key);
+    if (blob?.data) {
+      data = Buffer.isBuffer(blob.data) ? blob.data : Buffer.from(blob.data);
+      type = blob.mime || type;
+    }
+  }
+
+  if (!data && backend !== 'maria') {
+    const file = path.join(UPLOAD_DIR, key);
+    if (fs.existsSync(file)) data = await fs.promises.readFile(file);
+  }
+
+  return data ? { data, type, key } : null;
+}
+
+/** Send bytes back with cache headers and HTTP range support (video seeking). */
+function sendMedia(res, data, type, cacheControl = 'private, max-age=60') {
+  res.setHeader('Content-Type', type);
+  res.setHeader('Content-Length', String(data.length));
+  res.setHeader('Cache-Control', cacheControl);
+  res.setHeader('Accept-Ranges', 'bytes');
+  const range = res.req.headers.range;
+  if (range) {
+    const match = /bytes=(\d+)-(\d*)/.exec(range);
+    if (match) {
+      const start = Number(match[1]);
+      const end = match[2] ? Number(match[2]) : data.length - 1;
+      if (start < data.length) {
+        res.status(206);
+        res.setHeader('Content-Range', `bytes ${start}-${end}/${data.length}`);
+        res.setHeader('Content-Length', String(end - start + 1));
+        return res.end(data.subarray(start, end + 1));
+      }
+    }
+  }
+  return res.end(data);
+}
+
+// ── Profile photos (avatar / banner) ────────────────────────────────────────
+
+/** Images only — a profile photo is never a video, and never arbitrary bytes. */
+const PHOTO_TYPES = {
+  'image/jpeg': '.jpg',
+  'image/png': '.png',
+  'image/webp': '.webp',
+  'image/gif': '.gif',
+};
+const PHOTO_MAX_BYTES = 4 * 1024 * 1024; // 4 MB, inside Vercel's body limit
+
+/**
+ * Store one account's profile photo under a key that names its owner, so an
+ * orphaned file is obvious in a bucket listing and never collides across
+ * accounts. Same storage ladder as post media: Blob → `media_blobs` → disk.
+ *
+ * @returns {Promise<string>} the key to write into `accounts.avatar_key`
+ */
+async function saveProfilePhoto({ buffer, contentType, kind, accountId }) {
+  requireDb();
+  const mime = String(contentType || '').split(';')[0].trim().toLowerCase();
+  const ext = PHOTO_TYPES[mime];
+  if (!ext) {
+    throw new AuthError('photo-type', 'Upload a JPEG, PNG, WebP or GIF image.', 415);
+  }
+  if (!buffer || !buffer.length) {
+    throw new AuthError('photo-empty', 'That file is empty — choose another one.', 400);
+  }
+  if (buffer.length > PHOTO_MAX_BYTES) {
+    throw new AuthError('photo-too-large', 'Photos must be 4 MB or smaller.', 413);
+  }
+  const prefix = `${kind === 'banner' ? 'bnn' : 'avt'}${Number(accountId) || 0}-`;
+  const key = `${prefix}${Date.now().toString(36)}${crypto.randomBytes(4).toString('hex')}${ext}`;
+  if (await mediaStore.save(key, mime, buffer)) return key;
+  if (backend === 'maria') {
+    await mariaStore.saveMediaBlob(key, mime, buffer);
+    return key;
+  }
+  await fs.promises.mkdir(UPLOAD_DIR, { recursive: true });
+  await fs.promises.writeFile(path.join(UPLOAD_DIR, key), buffer);
+  return key;
+}
+
+/** Remove a photo's bytes from every backend it might have landed in. */
+async function deleteProfilePhoto(key) {
+  if (!key) return;
+  const safe = path.basename(String(key));
+  if (!safeKey(safe)) return;
+  try {
+    await mediaStore.remove(safe);
+  } catch (err) {
+    console.warn('[commerce] photo blob delete failed:', err.message);
+  }
+  if (backend === 'maria') {
+    await mariaStore.deleteMediaBlob(safe).catch(() => 0);
+    return;
+  }
+  await fs.promises.unlink(path.join(UPLOAD_DIR, safe)).catch(() => undefined);
+}
+
+/**
+ * Stream a profile photo back. Public and cacheable: an avatar is not
+ * private content (the paywall applies to posts, not to a face), and the
+ * 1-hour cache keeps repeat page views off the storage layer.
+ */
+async function readProfilePhoto(username, kind, res) {
+  requireDb();
+  const photos = await mariaStore.getAccountPhotos(username);
+  const key = kind === 'banner' ? photos?.bannerKey : photos?.avatarKey;
+  if (!photos || !key) {
+    throw new AuthError('not-found', 'No photo here.', 404);
+  }
+  const stored = await readMediaBytes(key);
+  if (!stored) throw new AuthError('not-found', 'That photo is missing.', 404);
+  return sendMedia(res, stored.data, stored.type, 'public, max-age=3600');
+}
+
+/**
  * Stream the media file behind a post — the paywall's enforcement point.
  * Files are never exposed statically, so this is the only way in.
  *
@@ -371,58 +514,11 @@ async function readPostMedia(user, id, res, token) {
   }
 
   const key = path.basename(post.mediaKey);
-  const mimeFor = (value) =>
-    Object.entries(MEDIA_TYPES).find(([, ext]) => value.endsWith(ext))?.[0] ||
-    'application/octet-stream';
-
-  let data = null;
-  let type = mimeFor(key);
-  try {
-    const stored = await mediaStore.read(key);
-    if (stored?.data) {
-      data = stored.data;
-      type = stored.mime || type;
-    }
-  } catch (err) {
-    console.warn('[commerce] blob read failed:', err.message);
-  }
-
-  if (!data && backend === 'maria') {
-    const blob = await mariaStore.getMediaBlob(key);
-    if (blob?.data) {
-      data = Buffer.isBuffer(blob.data) ? blob.data : Buffer.from(blob.data);
-      type = blob.mime || type;
-    }
-  }
-
-  if (!data && backend !== 'maria') {
-    const file = path.join(UPLOAD_DIR, key);
-    if (safeKey(key) && fs.existsSync(file)) data = await fs.promises.readFile(file);
-  }
-
-  if (!data) {
+  const stored = await readMediaBytes(key);
+  if (!stored) {
     throw new AuthError('not-found', 'That file is missing — the creator can re-upload it.', 404);
   }
-
-  res.setHeader('Content-Type', type);
-  res.setHeader('Content-Length', String(data.length));
-  res.setHeader('Cache-Control', 'private, max-age=60');
-  res.setHeader('Accept-Ranges', 'bytes');
-  const range = res.req.headers.range;
-  if (range) {
-    const match = /bytes=(\d+)-(\d*)/.exec(range);
-    if (match) {
-      const start = Number(match[1]);
-      const end = match[2] ? Number(match[2]) : data.length - 1;
-      if (start < data.length) {
-        res.status(206);
-        res.setHeader('Content-Range', `bytes ${start}-${end}/${data.length}`);
-        res.setHeader('Content-Length', String(end - start + 1));
-        return res.end(data.subarray(start, end + 1));
-      }
-    }
-  }
-  return res.end(data);
+  return sendMedia(res, stored.data, stored.type);
 }
 
 async function removePost(user, id, { admin = false } = {}) {
@@ -1063,6 +1159,11 @@ module.exports = {
   isAdultAllowed,
   // posts
   saveUpload,
+  saveProfilePhoto,
+  deleteProfilePhoto,
+  readProfilePhoto,
+  readMediaBytes,
+  sendMedia,
   isMediaKey,
   mediaContentTypes,
   createPost,

@@ -24,6 +24,7 @@ import {
 import { Link, navigate } from '../lib/router';
 import { mediaSrc } from '../lib/mediaUrl';
 import MediaImg from '../components/MediaImg';
+import Avatar from '../components/Avatar';
 import PaySheet from '../components/PaySheet';
 import {
   ArrowLeftIcon,
@@ -242,16 +243,28 @@ export default function CreatorPage({
       )}
 
       {/* ── Identity + actions ──────────────────────────────────────────── */}
-      <section className="card p-5">
+      <section className="card overflow-hidden p-0">
+        {/* The creator's own background, then their face over it — the same
+            two photos the feed cards and this page's header share. */}
+        <div
+          className="h-32 w-full bg-cover bg-center"
+          style={{
+            backgroundImage: creator.bannerUrl
+              ? `url("${mediaSrc(creator.bannerUrl)}")`
+              : 'linear-gradient(120deg, rgba(109,153,255,.22), rgba(106,59,216,.18))',
+          }}
+          aria-hidden="true"
+        />
+        <div className="p-5">
         <div className="flex flex-wrap items-start gap-4">
-          <span className="relative block h-16 w-16 shrink-0">
-            <span className="flex h-16 w-16 items-center justify-center rounded-full bg-accent/20 text-2xl font-black text-accent">
-              {creator.username.slice(0, 1).toUpperCase()}
-            </span>
-            <span className="absolute -bottom-1 -right-1 text-xl leading-none">
-              {flagFromCountry(creator.country || 'KE')}
-            </span>
-          </span>
+          <Avatar
+            username={creator.username}
+            src={creator.avatarUrl}
+            className="-mt-12 h-16 w-16 ring-4 ring-[#10121c]"
+            letterClass="text-2xl"
+          >
+            <span className="text-xl leading-none">{flagFromCountry(creator.country || 'KE')}</span>
+          </Avatar>
 
           <div className="min-w-0 flex-1">
             <h1 className="truncate text-xl font-bold text-ink">@{creator.username}</h1>
@@ -343,6 +356,7 @@ export default function CreatorPage({
             </p>
           </div>
         )}
+        </div>
       </section>
 
       {/* ── Posts ───────────────────────────────────────────────────────── */}

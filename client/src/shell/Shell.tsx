@@ -25,6 +25,7 @@ import { loadAccount, signOutAccount } from '../lib/auth';
 import { Link, matchRoute, navigate, useRoute } from '../lib/router';
 import type { AccountUser } from '../types';
 import AuthDialog from '../components/AuthDialog';
+import Avatar from '../components/Avatar';
 import {
   AlertIcon,
   CamIcon,
@@ -215,9 +216,12 @@ export default function Shell() {
                   to="/profile"
                   className="flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-2.5 py-1.5 text-ink transition-colors hover:bg-white/10"
                 >
-                  <span className="flex h-6 w-6 items-center justify-center rounded-full bg-accent/20 text-[11px] font-bold text-accent">
-                    {account.username.slice(0, 1).toUpperCase()}
-                  </span>
+                  <Avatar
+                    username={account.username}
+                    src={account.avatarUrl}
+                    className="h-6 w-6"
+                    letterClass="text-[11px]"
+                  />
                   <span className="max-w-[9rem] truncate font-medium">{account.username}</span>
                 </Link>
               ) : (

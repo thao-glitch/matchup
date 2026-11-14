@@ -28,6 +28,7 @@ import {
   type Paged,
 } from './api';
 import { ErrorBanner, Loading, Pill, TD, TH } from './ui';
+import { AccountInspectorModal, PostInspectorModal } from './Inspector';
 
 const PAGE_SIZE = 25;
 const DEBOUNCE_MS = 300;
@@ -58,6 +59,9 @@ export default function UsersTab() {
   /** Id of the row being mutated — every other action button stays usable. */
   const [busyId, setBusyId] = useState<number | null>(null);
   const [reload, setReload] = useState(0);
+  /** Account / post being supervised — one modal at a time, post on top. */
+  const [viewingAccountId, setViewingAccountId] = useState<number | null>(null);
+  const [viewingPostId, setViewingPostId] = useState<number | null>(null);
 
   // Debounced search: one request per typing pause, never per keystroke.
   useEffect(() => {
@@ -193,6 +197,7 @@ export default function UsersTab() {
                     busy={busyId === user.id}
                     onPatch={patch}
                     onRemove={remove}
+                    onInspect={setViewingAccountId}
                   />
                 ))}
               </tbody>
@@ -226,6 +231,17 @@ export default function UsersTab() {
       ) : (
         <p className="py-10 text-center text-sm text-muted">No users match this search.</p>
       )}
+
+      {viewingAccountId !== null && (
+        <AccountInspectorModal
+          accountId={viewingAccountId}
+          onClose={() => setViewingAccountId(null)}
+          onViewPost={(postId) => setViewingPostId(postId)}
+        />
+      )}
+      {viewingPostId !== null && (
+        <PostInspectorModal postId={viewingPostId} onClose={() => setViewingPostId(null)} />
+      )}
     </div>
   );
 }
@@ -235,9 +251,10 @@ interface RowProps {
   busy: boolean;
   onPatch: (user: AdminUser, body: Record<string, unknown>) => void;
   onRemove: (user: AdminUser) => void;
+  onInspect: (id: number) => void;
 }
 
-function UserRow({ user, busy, onPatch, onRemove }: RowProps) {
+function UserRow({ user, busy, onPatch, onRemove, onInspect }: RowProps) {
   const premium = isPremiumActive(user);
   const expired = !premium && user.premiumUntil !== null;
   const pending = user.paymentsPending > 0;
@@ -289,6 +306,14 @@ function UserRow({ user, busy, onPatch, onRemove }: RowProps) {
       </td>
       <td className={TD}>
         <div className="flex flex-wrap items-center justify-end gap-1.5">
+          <button
+            type="button"
+            className="btn btn-primary px-2.5 py-1.5 text-xs"
+            disabled={busy}
+            onClick={() => onInspect(user.id)}
+          >
+            Inspect
+          </button>
           <button
             type="button"
             className={`btn px-2.5 py-1.5 text-xs ${user.banned ? 'btn-ghost' : 'btn-ghost text-danger'}`}

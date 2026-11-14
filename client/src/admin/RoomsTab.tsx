@@ -14,6 +14,7 @@
 import { useEffect, useState } from 'react';
 import { errorMessage, formatDateTime, formatKes, request, type AdminRoom, type Paged } from './api';
 import { ErrorBanner, Loading, Pill, TD, TH } from './ui';
+import { RoomInspectorModal } from './Inspector';
 
 const PAGE_SIZE = 25;
 
@@ -35,6 +36,8 @@ export default function RoomsTab() {
   /** Id of the room being mutated — other rows stay clickable. */
   const [busyId, setBusyId] = useState<number | null>(null);
   const [reload, setReload] = useState(0);
+  /** Room being supervised — roster and takings, past the paywall. */
+  const [viewingRoomId, setViewingRoomId] = useState<number | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -188,6 +191,14 @@ export default function RoomsTab() {
                     </td>
                     <td className={TD}>
                       <div className="flex items-center justify-end gap-1.5">
+                        <button
+                          type="button"
+                          className="btn btn-primary px-2.5 py-1.5 text-xs"
+                          disabled={busyId === room.id}
+                          onClick={() => setViewingRoomId(room.id)}
+                        >
+                          Inspect
+                        </button>
                         {room.status === 'live' ? (
                           <button
                             type="button"
@@ -242,6 +253,10 @@ export default function RoomsTab() {
         <Loading what="rooms" />
       ) : (
         <p className="py-10 text-center text-sm text-muted">No rooms match this filter.</p>
+      )}
+
+      {viewingRoomId !== null && (
+        <RoomInspectorModal roomId={viewingRoomId} onClose={() => setViewingRoomId(null)} />
       )}
     </div>
   );

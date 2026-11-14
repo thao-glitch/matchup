@@ -20,6 +20,7 @@ const payments = require('./src/payments');
 const commerce = require('./src/commerce');
 const mpesa = require('./src/mpesa');
 const socialStore = require('./src/socialStore');
+const mariaStore = require('./src/mariaStore');
 const mediaStore = require('./src/mediaStore');
 const { handleUpload } = require('@vercel/blob/client');
 
@@ -719,6 +720,80 @@ app.post('/api/media/direct', contentLimiter, async (req, res) => {
   return undefined;
 });
 
+// ── Profile photos ──────────────────────────────────────────────────────────
+
+/**
+ * GET /api/profile/:username/photo/:kind → the raw image.
+ *
+ * Public on purpose: an avatar is the same thing as a face in a lobby, not
+ * private content, and it must work in a plain `<img src>` with no bearer
+ * token (that is what makes it render for *other* users). The bytes still
+ * come from the private store through this route — the object store itself
+ * is never reachable from the browser.
+ */
+app.get('/api/profile/:username/photo/:kind', readLimiter, async (req, res) => {
+  try {
+    const kind = req.params.kind === 'banner' ? 'banner' : 'avatar';
+    await commerce.readProfilePhoto(String(req.params.username || ''), kind, res);
+  } catch (err) {
+    sendAuthError(res, err);
+  }
+  return undefined;
+});
+
+/**
+ * POST /api/me/photo?kind=avatar|banner (Bearer) raw bytes → { photo }.
+ *
+ * Photos are small, so unlike post media they proxy straight through the
+ * function — no direct-to-Blob round trip, one endpoint, one code path.
+ * The previous photo's bytes are deleted after the new key is stored, so a
+ * re-upload never leaks the old file into the orphan sweep window.
+ */
+app.post(
+  '/api/me/photo',
+  contentLimiter,
+  express.raw({ type: () => true, limit: '4mb' }),
+  async (req, res) => {
+    try {
+      const user = await requireUser(req, res);
+      if (!user) return undefined;
+      const kind = String(req.query.kind || 'avatar') === 'banner' ? 'banner' : 'avatar';
+      const previous = kind === 'banner' ? user.bannerKey : user.avatarKey;
+      const key = await commerce.saveProfilePhoto({
+        buffer: req.body,
+        contentType: req.headers['content-type'],
+        kind,
+        accountId: user.id,
+      });
+      await mariaStore.setAccountPhoto(user.id, kind, key);
+      if (previous && previous !== key) await commerce.deleteProfilePhoto(previous);
+      res.status(201).json({
+        kind,
+        url: `/api/profile/${encodeURIComponent(user.username)}/photo/${kind}`,
+      });
+    } catch (err) {
+      sendAuthError(res, err);
+    }
+    return undefined;
+  },
+);
+
+/** DELETE /api/me/photo?kind=avatar|banner (Bearer) → { removed: true } */
+app.delete('/api/me/photo', contentLimiter, async (req, res) => {
+  try {
+    const user = await requireUser(req, res);
+    if (!user) return undefined;
+    const kind = String(req.query.kind || 'avatar') === 'banner' ? 'banner' : 'avatar';
+    const previous = kind === 'banner' ? user.bannerKey : user.avatarKey;
+    await mariaStore.setAccountPhoto(user.id, kind, null);
+    if (previous) await commerce.deleteProfilePhoto(previous);
+    res.json({ removed: true, kind });
+  } catch (err) {
+    sendAuthError(res, err);
+  }
+  return undefined;
+});
+
 // ── Charges (M-PESA STK push) ────────────────────────────────────────────────
 
 /**
@@ -993,6 +1068,38 @@ app.get('/api/admin/posts', adminLimiter, adminRoute(async (identity, req, res) 
 /** PATCH /api/admin/posts/:id { status?, note?, deleteComments? } → { post } */
 app.patch('/api/admin/posts/:id', adminLimiter, adminRoute(async (identity, req, res) => {
   res.json(await admin.moderatePost(identity, Number(req.params.id), req.body || {}));
+}));
+
+/** GET /api/admin/posts/:id → the full post: comments (all) + who paid. */
+app.get('/api/admin/posts/:id', adminLimiter, adminRoute(async (identity, req, res) => {
+  res.set('Cache-Control', 'no-store');
+  return res.json(await admin.postDetail(identity, Number(req.params.id)));
+}));
+
+/**
+ * GET /api/admin/posts/:id/media → the raw file, past the paywall and the
+ * 18+ gate. Supervision only: the dashboard token is what authorizes it, and
+ * opening a paid/adult file writes an audit row.
+ */
+app.get('/api/admin/posts/:id/media', adminLimiter, adminRoute(async (identity, req, res) => {
+  return admin.readPostMedia(identity, Number(req.params.id), res);
+}));
+
+/**
+ * GET /api/admin/accounts/:id → everything happening in one user's account:
+ * profile and photos, every post (paid and adult included), comments, likes,
+ * follows, subscriptions bought and sold, charges, wallet, sessions, stamps
+ * and rooms. The supervision surface behind the Users tab.
+ */
+app.get('/api/admin/accounts/:id', adminLimiter, adminRoute(async (identity, req, res) => {
+  res.set('Cache-Control', 'no-store');
+  return res.json(await admin.accountDetail(identity, Number(req.params.id)));
+}));
+
+/** GET /api/admin/rooms/:id → the room, its live roster and its takings. */
+app.get('/api/admin/rooms/:id', adminLimiter, adminRoute(async (identity, req, res) => {
+  res.set('Cache-Control', 'no-store');
+  return res.json(await admin.roomDetail(identity, Number(req.params.id)));
 }));
 
 /** GET /api/admin/charges?status=&purpose=&q=&page=&size= → the new ledger. */

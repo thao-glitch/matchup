@@ -341,6 +341,13 @@ with everything prefilled.
 * **Everything is editable**: username, age, gender, country, preferred genders
   and the age range — `PUT /profile` validates through the same `validateProfile`
   the queue uses, and a rename goes through the unique index (409 on collision).
+* **Profile photos**: an avatar and a background photo per account, uploaded in
+  **Settings** (`POST /api/me/photo`, raw bytes, JPEG/PNG/WebP/GIF ≤ 4 MB).
+  Other people see them on your profile, your public creator page, your posts,
+  your comments and the nav chip; a missing photo falls back to your first
+  letter. Stored in the same private Blob/DB ladder as post media (`avatar_key` /
+  `banner_key` on the account) — never a public bucket, and the daily sweep
+  keeps anything an account still references.
 * **Backends**: MariaDB (`accounts`/`account_sessions`, created idempotently on
   boot) when the store is up, an in-process Map otherwise. `GET /health` reports
   `accounts: maria | memory`.
@@ -439,7 +446,11 @@ Two features that live entirely behind the same process — no extra service:
 **`/admin`** — a login-protected dashboard (`server/src/admin.js` +
 `client/src/admin/`): live users and queue, call telemetry, the payments
 ledger, feature switches (ads / sign-ups / payments / **maintenance**), ban &
-premium controls and an audit trail of every action. Admins live in their own
+premium controls, a full per-account **Inspect** view (every post — paid and
+18+ included — comments, follows, subscriptions, charges, wallet, sessions
+and rooms, with the media itself streamed to the owner past the paywall and
+audited whenever it is paid or adult), room rosters and an audit trail of
+every action. Admins live in their own
 `admins` table with their own scrypt hashes and 12-hour sessions — being a
 user of the app can never make you an admin of it.
 

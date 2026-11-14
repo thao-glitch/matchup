@@ -498,6 +498,111 @@ export async function request<T>(path: string, init: RequestInit = {}): Promise<
   return (await res.json()) as T;
 }
 
+// ── Supervision: one account / one post / one room, in full ──────────────────
+
+/** Every subscription the account holds or sells, mapped camelCase server-side. */
+export interface AdminSubscription {
+  id: number;
+  subscriberId: number;
+  creatorId: number;
+  otherUsername: string;
+  status: 'active' | 'canceled' | 'expired';
+  price: number;
+  currency: string;
+  periodDays: number;
+  startedAt: string | null;
+  expiresAt: string | null;
+  canceledAt: string | null;
+}
+
+/** A row of one account's footprint, as `GET /api/admin/accounts/:id` sends it. */
+export interface AdminAccountDetail {
+  account: AdminUser & {
+    avatarUrl: string | null;
+    bannerUrl: string | null;
+    stats: {
+      posts: number;
+      comments: number;
+      likes: number;
+      following: number;
+      followers: number;
+      subsBought: number;
+      subsSold: number;
+      chargesBought: number;
+      chargesEarned: number;
+      sessions: number;
+      roomsHosted: number;
+    };
+  };
+  posts: AdminPost[];
+  comments: { id: number; postId: number; body: string; status: string; createdAt: string }[];
+  likes: { postId: number; createdAt: string }[];
+  following: { id: number; username: string; createdAt: string }[];
+  followers: { id: number; username: string; createdAt: string }[];
+  subscriptions: {
+    bought: AdminSubscription[];
+    sold: AdminSubscription[];
+    offer: {
+      enabled: boolean;
+      price: number;
+      currency: string;
+      periodDays: number;
+      perk: string;
+    } | null;
+  };
+  charges: { bought: AdminCharge[]; earned: AdminCharge[] };
+  wallet: WalletRow | null;
+  walletEntries: WalletEntryRow[];
+  sessions: { live: number; latest: string | null; first: string | null };
+  stamps: { country: string; count: number; lastAt: string }[];
+  rooms: {
+    hosted: AdminRoom[];
+    live: { slug: string; sid: string; country: string; at: number }[];
+  };
+}
+
+/** Everything behind one post, including paid and 18+ rows. */
+export interface AdminPostDetail {
+  post: AdminPost & {
+    creatorCountry: string;
+    mediaUrl: string | null;
+    createdAt: string;
+  };
+  comments: {
+    id: number;
+    accountId: number;
+    username: string;
+    body: string;
+    status: string;
+    createdAt: string;
+  }[];
+  purchases: {
+    id: number;
+    buyerId: number;
+    buyer: string;
+    amount: number;
+    status: string;
+    paidAt: string | null;
+    createdAt: string;
+  }[];
+}
+
+/** Everything behind one room, including its live roster and takings. */
+export interface AdminRoomDetail {
+  room: AdminRoom;
+  participants: { sid: string; username: string; country: string; at: number }[];
+  headcount: number;
+  purchases: {
+    id: number;
+    buyerId: number;
+    buyer: string;
+    amount: number;
+    status: string;
+    paidAt: string | null;
+    createdAt: string;
+  }[];
+}
+
 // ── Formatting ───────────────────────────────────────────────────────────────
 
 // One formatter instance per shape: Intl construction is comparatively slow
@@ -612,8 +717,43 @@ export function flagEmoji(code: string | null | undefined): string {
   return String.fromCodePoint(...Array.from(clean, (ch) => 0x1f1e6 + ch.charCodeAt(0) - 65));
 }
 
+// ── Supervision fetchers ──────────────────────────────────────────────────────
+
+/** `GET /api/admin/accounts/:id` — the full account footprint. */
+export function getAccountDetail(id: number): Promise<AdminAccountDetail> {
+  return request<AdminAccountDetail>(`/accounts/${id}`);
+}
+
+/** `GET /api/admin/posts/:id` — the post plus every comment and buyer. */
+export function getPostDetail(id: number): Promise<AdminPostDetail> {
+  return request<AdminPostDetail>(`/posts/${id}`);
+}
+
+/** `GET /api/admin/rooms/:id` — the room plus its live roster and takings. */
+export function getRoomDetail(id: number): Promise<AdminRoomDetail> {
+  return request<AdminRoomDetail>(`/rooms/${id}`);
+}
+
 /**
- * Check the Daraja setup, optionally firing a real KES 1 prompt at `phone`.
+ * Fetch the raw bytes of a paid or 18+ post with the admin token attached.
+ * The media route authorizes with a Bearer header (an `<img>` tag cannot send
+ * one), so the inspector pulls the file as a blob and hands back an object
+ * URL — the paywall is bypassed for the owner, never for anyone else.
+ */
+export async function fetchAdminPostMedia(id: number): Promise<string> {
+  const token = getToken();
+  const res = await fetch(`${BASE}/posts/${id}/media`, {
+    headers: token ? { authorization: `Bearer ${token}` } : undefined,
+    cache: 'no-store',
+  });
+  if (!res.ok) {
+    throw new ApiError(String(res.status), `Could not load this media (HTTP ${res.status}).`);
+  }
+  const blob = await res.blob();
+  return URL.createObjectURL(blob);
+}
+
+/** Check the Daraja setup, optionally firing a real KES 1 prompt at `phone`.
  * The only way to tell "credentials are wrong" from "shortcode is missing"
  * without reading a stack trace.
  */

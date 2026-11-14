@@ -22,6 +22,7 @@ import {
   type Paged,
 } from './api';
 import { ErrorBanner, Loading, Pill, TD, TH } from './ui';
+import { PostInspectorModal } from './Inspector';
 
 const PAGE_SIZE = 25;
 const DEBOUNCE_MS = 300;
@@ -54,6 +55,8 @@ export default function ContentTab() {
   /** Id of the row being mutated — every other action button stays usable. */
   const [busyId, setBusyId] = useState<number | null>(null);
   const [reload, setReload] = useState(0);
+  /** Post being supervised — opens the media/comment/purchases inspector. */
+  const [viewingPostId, setViewingPostId] = useState<number | null>(null);
 
   // One request per typing pause, never per keystroke.
   useEffect(() => {
@@ -216,6 +219,14 @@ export default function ContentTab() {
                     </td>
                     <td className={TD}>
                       <div className="flex flex-wrap items-center justify-end gap-1.5">
+                        <button
+                          type="button"
+                          className="btn btn-primary px-2.5 py-1.5 text-xs"
+                          disabled={busyId === post.id}
+                          onClick={() => setViewingPostId(post.id)}
+                        >
+                          Inspect
+                        </button>
                         {post.status !== 'hidden' && post.status !== 'removed' && (
                           <button
                             type="button"
@@ -280,6 +291,10 @@ export default function ContentTab() {
         <Loading what="posts" />
       ) : (
         <p className="py-10 text-center text-sm text-muted">No posts match this filter.</p>
+      )}
+
+      {viewingPostId !== null && (
+        <PostInspectorModal postId={viewingPostId} onClose={() => setViewingPostId(null)} />
       )}
     </div>
   );
