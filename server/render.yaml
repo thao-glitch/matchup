@@ -37,9 +37,9 @@ services:
       - key: MONGODB_URI
         sync: false
 
-      # ── WebRTC connectivity — STUN only ───────────────────────────────────
-      # Video, audio and in-call chat travel directly between browsers. No TURN
-      # relay is configured or required.
+      # ── Connectivity — no STUN/TURN, no third-party relay ───────────────
+      # Video, audio and in-call chat travel over the app-server relay
+      # (HTTP long-poll), so nothing hosted needs to be configured here.
 
       - key: PRESENCE_INTERVAL_MS
         value: "5000"
