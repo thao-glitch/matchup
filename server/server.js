@@ -1188,7 +1188,15 @@ app.get('/api/admin/wallet-entries', adminLimiter, adminRoute(async (identity, r
 // ── Optional: host the SPA from this process ─────────────────────────────────
 if (servesClient) {
   console.info(`[http] serving client bundle from ${CLIENT_DIST}`);
-  app.use(express.static(CLIENT_DIST, { maxAge: '1h', index: 'index.html' }));
+  app.use(express.static(CLIENT_DIST, {
+    maxAge: '1h',
+    index: 'index.html',
+    setHeaders: (res, filePath) => {
+      // The root document must never pin an old bundle for more than a
+      // browsing session — revalidate it every time; hashed assets keep 1 h.
+      if (filePath.endsWith('.html')) res.setHeader('Cache-Control', 'no-cache');
+    },
+  }));
   // SPA fallback for any non-API GET (Express 5 dropped the `*` wildcard).
   app.use((req, res, next) => {
     if (req.method !== 'GET' || req.path.startsWith('/api')) return next();
