@@ -235,6 +235,15 @@ async function createPost(user, input = {}) {
     price = Math.min(c.maxPrice, Math.max(c.minPrice, price));
   }
 
+  // Paid posts are always timed — never forever. The window travels with the
+  // post and is stamped onto the buyer's access row at settlement time.
+  let accessMinutes = null;
+  if (price > 0) {
+    const raw = Math.trunc(Number(input.accessMinutes) || 60);
+    // 1…1440 minutes (1 minute … 24 hours); the default is 60.
+    accessMinutes = Math.min(1440, Math.max(1, raw));
+  }
+
   return socialStore.insertPost({
     accountId: user.id,
     username: user.username,
@@ -245,6 +254,7 @@ async function createPost(user, input = {}) {
     price,
     currency: c.currency,
     isAdult,
+    accessMinutes,
   });
 }
 
@@ -1044,6 +1054,14 @@ async function settle(chargeId, { receipt = null, resultCode = 0, description = 
     mariaStore
       .query('UPDATE posts SET purchases = purchases + 1 WHERE id = ?', [charge.refId])
       .catch(() => undefined);
+    const post = await socialStore.getPost(charge.refId, { withCountry: false }).catch(() => null);
+    const minutes = post?.accessMinutes ?? 60;
+    await socialStore.grantPostAccess({
+      accountId: charge.buyerId,
+      postId: charge.refId,
+      chargeId: charge.id,
+      accessMinutes: minutes,
+    }).catch((err) => console.error('[settle] post access grant failed:', err.message));
   }
   return true;
 }

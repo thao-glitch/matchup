@@ -29,6 +29,7 @@ import {
   flagEmoji,
   timeAgo,
 } from './api';
+import { accessLabel } from '../lib/duration';
 import { ErrorBanner, Modal, Pill } from './ui';
 
 // ── Shared bits ─────────────────────────────────────────────────────────────
@@ -230,10 +231,13 @@ export function AccountInspectorModal({
               <Empty>This account has never posted.</Empty>
             ) : (
               <Table
-                head={['#', 'Type', 'Price', 'Status', 'Views', 'Likes', '']}
+                head={['#', 'Type', 'Access', 'Price', 'Status', 'Views', 'Likes', '']}
                 rows={posts.map((post) => [
                   <span key="id" className="tabular-nums">#{post.id}</span>,
                   <span key="type" className="uppercase">{post.type}{post.isAdult ? ' · 18+' : ''}</span>,
+                  <span key="access" className="text-muted">
+                    {post.accessMinutes != null ? accessLabel(post.accessMinutes).replace(' access', '') : 'Forever'}
+                  </span>,
                   post.price > 0 ? `${formatKes(post.price)}` : 'free',
                   statusPill(post.status),
                   <span key="views" className="tabular-nums">{post.views}</span>,

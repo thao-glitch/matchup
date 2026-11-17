@@ -292,6 +292,19 @@ const SCHEMA_POSTS = `
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 `;
 
+const SCHEMA_POST_ACCESS = `
+  CREATE TABLE IF NOT EXISTS post_access (
+    account_id INT UNSIGNED NOT NULL,
+    post_id    INT UNSIGNED NOT NULL,
+    charge_id  INT UNSIGNED NULL DEFAULT NULL,
+    expires_at DATETIME      NOT NULL,
+    created_at TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (account_id, post_id),
+    KEY idx_post_access_post (post_id),
+    KEY idx_post_access_expires (expires_at)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+`;
+
 const SCHEMA_POST_LIKES = `
   CREATE TABLE IF NOT EXISTS post_likes (
     post_id     INT UNSIGNED NOT NULL,
@@ -708,9 +721,11 @@ async function applySchema() {
   await pool.query(SCHEMA_FOLLOWS);
   await pool.query(SCHEMA_CREATOR_SUBS);
   await pool.query(SCHEMA_SUBSCRIPTIONS);
+  await pool.query(SCHEMA_POST_ACCESS);
   for (const stmt of SCHEMA_RT) await pool.query(stmt);
   await pool.query(SCHEMA_MEDIA_BLOBS);
   await ensureAccountColumns();
+  await ensurePostColumns();
   await ensureChargeColumns();
   // Existing databases predate these cleanup indexes.
   await ensureIndex('posts', 'idx_posts_media', 'media_key');
@@ -744,6 +759,10 @@ async function ensureColumns(table, columns) {
 }
 
 const ensureAccountColumns = () => ensureColumns('accounts', ACCOUNT_COLUMNS);
+const POST_COLUMNS = [
+  ['access_minutes', 'INT UNSIGNED NULL DEFAULT NULL'],
+];
+const ensurePostColumns = () => ensureColumns('posts', POST_COLUMNS);
 const ensureChargeColumns = () => ensureColumns('charges', CHARGE_COLUMNS);
 
 /** Add a missing index once; `CREATE INDEX IF NOT EXISTS` is not portable. */

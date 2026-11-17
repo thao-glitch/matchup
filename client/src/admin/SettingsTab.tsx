@@ -29,6 +29,17 @@ import {
 } from './api';
 import { ErrorBanner, Loading, Panel, Pill, Toggle } from './ui';
 
+/** 0 = Sunday … 6 = Saturday — shown on the Settings payout panel and to creators. */
+const WEEKDAYS: { value: number; label: string }[] = [
+  { value: 0, label: 'Sunday' },
+  { value: 1, label: 'Monday' },
+  { value: 2, label: 'Tuesday' },
+  { value: 3, label: 'Wednesday' },
+  { value: 4, label: 'Thursday' },
+  { value: 5, label: 'Friday' },
+  { value: 6, label: 'Saturday' },
+];
+
 /** All payment values start as text: an empty `<input type="number">` must
  *  not force `0` into state while the admin is mid-edit. */
 interface PaymentForm {
@@ -62,6 +73,7 @@ interface CommerceForm {
   manualEnabled: boolean;
   manualDestination: string;
   manualInstructions: string;
+  payoutDayOfWeek: string;
 }
 
 interface MpesaForm {
@@ -458,7 +470,7 @@ export default function SettingsTab() {
           settles the charge exactly as an STK callback would. */}
       <Panel
         title="Manual payments"
-        hint="No Daraja? Every pay button becomes a pending request you approve by hand after the SMS lands. The split, wallet credit and entitlement all work exactly as an STK payment."
+        hint="No Daraja? Every pay button becomes a pending request you approve by hand after the SMS lands. The split, wallet credit and entitlement all work exactly as an STK payment. Remember to press Save changes."
       >
         <div className="mt-3">
           <Toggle
@@ -495,6 +507,33 @@ export default function SettingsTab() {
               placeholder="Send the exact amount from the number you entered. We confirm it within a few minutes and unlock it instantly."
               onChange={(event) => setCommerce('manualInstructions', event.target.value)}
             />
+          </Field>
+        </div>
+      </Panel>
+
+      <Panel
+        title="Creator payouts"
+        hint="Creators request a withdrawal at any time; you pay them all out once a week on this day — when it arrives, send what the ledger says is owed and approve each request."
+      >
+        <div className="mt-3">
+          <Field
+            label="Payout day (once a week)"
+            hint="Creators see this day on the wallet page so they know when to expect their money."
+          >
+            <div className="flex flex-wrap gap-2">
+              {WEEKDAYS.map((day) => (
+                <button
+                  key={day.value}
+                  type="button"
+                  className={`btn px-3 py-1.5 text-xs ${
+                    Number(commerceForm.payoutDayOfWeek) === day.value ? 'btn-primary' : 'btn-ghost'
+                  }`}
+                  onClick={() => setCommerce('payoutDayOfWeek', String(day.value))}
+                >
+                  {day.label}
+                </button>
+              ))}
+            </div>
           </Field>
         </div>
       </Panel>
@@ -765,6 +804,7 @@ function toCommerceForm(commerce: CommerceSettings): CommerceForm {
     manualEnabled: commerce.manualEnabled,
     manualDestination: commerce.manualDestination,
     manualInstructions: commerce.manualInstructions,
+    payoutDayOfWeek: String(commerce.payoutDayOfWeek),
   };
 }
 
@@ -807,6 +847,10 @@ function diffCommerce(form: CommerceForm, remote: CommerceSettings): Partial<Com
   if (destination !== remote.manualDestination) out.manualDestination = destination;
   const instructions = form.manualInstructions.trim();
   if (instructions !== remote.manualInstructions) out.manualInstructions = instructions;
+  const day = Math.trunc(Number(form.payoutDayOfWeek));
+  if (!Number.isFinite(day) || day !== remote.payoutDayOfWeek) {
+    out.payoutDayOfWeek = Number.isFinite(day) ? Math.min(6, Math.max(0, day)) : remote.payoutDayOfWeek;
+  }
   return out;
 }
 

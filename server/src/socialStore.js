@@ -53,6 +53,8 @@ function mapPost(row) {
     linkUrl: row.link_url || null,
     price: num(row.price),
     currency: row.currency || 'KES',
+    /** Paid access window in minutes; null means pre-timed-access forever. */
+    accessMinutes: row.access_minutes == null ? null : Number(row.access_minutes),
     isAdult: Boolean(row.is_adult),
     status: row.status,
     views: Number(row.views) || 0,
@@ -172,11 +174,13 @@ async function insertPost({
   price = 0,
   currency = 'KES',
   isAdult = false,
+  accessMinutes = null,
 }) {
   const res = await query(
     `INSERT INTO posts
-       (account_id, username, type, caption, media_key, link_url, price, currency, is_adult)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (account_id, username, type, caption, media_key, link_url, price, currency, is_adult,
+        access_minutes)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       accountId,
       username,
@@ -187,6 +191,10 @@ async function insertPost({
       Math.max(0, num(price)),
       currency,
       isAdult ? 1 : 0,
+      // Paid posts are always timed (1–1440 min); free posts carry a null window.
+      accessMinutes == null
+        ? null
+        : Math.min(1440, Math.max(1, Math.trunc(Number(accessMinutes) || 60))),
     ],
   );
   return getPost(res.insertId);
@@ -364,8 +372,13 @@ async function decorateForViewer(posts, accountId, adultOk = false) {
     ),
     activeSubscriptionCreatorIds(accountId),
   ]);
+  const timed = await getPostAccessWindows(accountId, ids);
   const likedSet = new Set(likes.map((r) => Number(r.post_id)));
   const ownedSet = new Set(owned.map((r) => Number(r.ref_id)));
+  for (const [postId, expires] of timed) {
+    if (Date.parse(expires) > Date.now()) ownedSet.add(postId);
+    else ownedSet.delete(postId);
+  }
   return posts.map((p) => {
     // The creator owns their work by definition — the detail route has always
     // said so; without it here a creator's own priced post renders locked on
@@ -393,6 +406,46 @@ async function updatePostStatus(id, status) {
 async function deletePost(id) {
   const res = await query('DELETE FROM posts WHERE id = ?', [Number(id)]);
   return Number(res.affectedRows) > 0;
+}
+
+/**
+ * Grant (timed) access to one post, renewing whatever remains.
+ *
+ * The window is measured from the *later* of now or the existing expiry, so a
+ * buyer with time left who buys again extends their window instead of losing
+ * hours they paid for. Always minutes; new purchases carry a window (the
+ * default is 60) — every post sold today is timed, never permanent.
+ */
+async function grantPostAccess({ accountId, postId, chargeId = null, accessMinutes = 60 }) {
+  const minutes = Math.min(1440, Math.max(1, Math.trunc(Number(accessMinutes) || 60)));
+  const existing = await query(
+    'SELECT expires_at FROM post_access WHERE account_id = ? AND post_id = ?',
+    [Number(accountId), Number(postId)],
+  );
+  const currentMs = existing[0]?.expires_at ? new Date(existing[0].expires_at).getTime() : 0;
+  const base = Math.max(Date.now(), Number.isFinite(currentMs) ? currentMs : 0);
+  const expires = new Date(base + minutes * 60_000);
+  await query(
+    `INSERT INTO post_access (account_id, post_id, charge_id, expires_at)
+     VALUES (?, ?, ?, ?)
+     ON DUPLICATE KEY UPDATE charge_id = VALUES(charge_id), expires_at = VALUES(expires_at)`,
+    [Number(accountId), Number(postId), chargeId == null ? null : Number(chargeId), expires],
+  );
+  return expires;
+}
+
+/** Active access rows for one account across many posts — owned/locked flags. */
+async function getPostAccessWindows(accountId, refIds) {
+  if (!refIds.length) return new Map();
+  const placeholders = refIds.map(() => '?').join(',');
+  const rows = await query(
+    `SELECT post_id, expires_at FROM post_access
+      WHERE account_id = ? AND post_id IN (${placeholders})`,
+    [Number(accountId), ...refIds],
+  );
+  const out = new Map();
+  for (const row of rows) out.set(Number(row.post_id), row.expires_at);
+  return out;
 }
 
 /** Fire-and-forget: a slow counter must never slow the detail response. */
@@ -546,6 +599,18 @@ async function listChargesForBuyer({ purpose, buyerId, size = 10 } = {}) {
  * subscription buys a creator's posts, not their live rooms.
  */
 async function isEntitled({ purpose, refId, accountId }) {
+  if (purpose === 'post') {
+    // A timed purchase records a row here — once the window closes the row
+    // decides, even though its charge is still 'paid'.
+    const timed = await query(
+      `SELECT expires_at FROM post_access
+        WHERE account_id = ? AND post_id = ? LIMIT 1`,
+      [Number(accountId), Number(refId)],
+    );
+    if (timed.length > 0) {
+      return Boolean(timed[0]?.expires_at) && Date.parse(timed[0].expires_at) > Date.now();
+    }
+  }
   const rows = await query(
     `SELECT 1 FROM charges
       WHERE purpose = ? AND ref_id = ? AND buyer_account_id = ? AND status = 'paid'
@@ -575,7 +640,16 @@ async function entitledRefIds({ purpose, accountId, refIds }) {
       WHERE purpose = ? AND buyer_account_id = ? AND status = 'paid' AND ref_id IN (${placeholders})`,
     [purpose, Number(accountId), ...refIds],
   );
-  return new Set(rows.map((r) => Number(r.ref_id)));
+  const owned = new Set(rows.map((r) => Number(r.ref_id)));
+  if (purpose !== 'post') return owned;
+  // Timed purchases written after the access-window feature landed: an
+  // expired row revokes its charge; a live row unions in.
+  const timed = await getPostAccessWindows(accountId, refIds);
+  for (const [postId, expires] of timed) {
+    if (Date.parse(expires) > Date.now()) owned.add(postId);
+    else owned.delete(postId);
+  }
+  return owned;
 }
 
 /**
@@ -1207,6 +1281,8 @@ async function roomStats() {
 module.exports = {
   // posts
   insertPost,
+  grantPostAccess,
+  getPostAccessWindows,
   getPost,
   listPosts,
   decorateForViewer,

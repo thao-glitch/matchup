@@ -15,6 +15,12 @@ export interface Post {
   creatorBanned?: boolean;
   /** The creator's photo, or null so the UI falls back to their first letter. */
   creatorAvatarUrl?: string | null;
+  /**
+   * How long a purchase buys, in minutes. `null` marks pre-timed-access rows
+   * (permanent purchases). Every new paid post is timed — the creator picks
+   * the window and the server clamps it to 1…1440.
+   */
+  accessMinutes?: number | null;
   /** Viewer-specific follow state, annotated by the feed/detail endpoints. */
   creatorFollowing?: boolean;
   creatorSubscribed?: boolean;
@@ -160,6 +166,8 @@ export interface CommerceConfig {
     /** Free-text line shown verbatim on the pay screens. */
     instructions: string;
   };
+  /** Weekly payout day — creators get paid once a week; 0 = Sunday. */
+  payouts?: { dayOfWeek: number };
 }
 
 /** Payment inputs shared by the pay sheet for posts, rooms and subscriptions. */

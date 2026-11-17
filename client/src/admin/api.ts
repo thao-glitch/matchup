@@ -249,6 +249,8 @@ export interface AdminPost {
   creatorName: string;
   creatorCountry: string;
   type: 'image' | 'video' | 'link' | 'text';
+  /** Timed access in minutes; null = pre-timed-access (permanent) rows. */
+  accessMinutes?: number | null;
   caption: string;
   linkUrl: string | null;
   price: number;
@@ -355,6 +357,8 @@ export interface CommerceSettings {
   manualDestination: string;
   /** Free-text shown verbatim on the pay screen. */
   manualInstructions: string;
+  /** Weekly payout day — 0 = Sunday ... 6 = Saturday. */
+  payoutDayOfWeek: number;
 }
 
 /** Secrets arrive masked as `••••••••`; writing a masked value back keeps

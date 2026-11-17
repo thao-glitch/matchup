@@ -73,6 +73,10 @@ do, the app runs a **manual payment review** instead of firing a PIN prompt:
    screen shows them the amount, the exact number to send it to, their own
    phone number and a reference. They send the money any way M-PESA allows
    (Pochi, pay-someone, Airtel Money — whatever reaches the destination).
+   Every paid post is timed: the creator picks the window (15 min → 24 h) when
+   they publish, and a purchase grants exactly that window — nothing is ever
+   "forever". The window renews by buying again, extended from the later of
+   now or the existing expiry.
 3. The purchase appears in **`/admin` → Earnings → Charges** as **pending**,
    with the buyer's phone number, the amount, and the purpose (`post` /
    `room` / `sub` / `premium`) — enough to match the SMS.

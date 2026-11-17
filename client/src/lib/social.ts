@@ -125,6 +125,8 @@ export interface NewPost {
   type: 'image' | 'video' | 'link' | 'text';
   mediaKey?: string;
   linkUrl?: string;
+  /** Timed access for paid posts — minutes, clamped server-side to 1…1440. */
+  accessMinutes?: number;
 }
 
 export function createPost(input: NewPost): Promise<{ post: Post }> {

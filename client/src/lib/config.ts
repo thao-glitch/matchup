@@ -73,6 +73,7 @@ export const DEFAULT_CONFIG: PublicConfig = {
     maxPrice: 15000,
     currency: 'KES',
     mpesaReady: false,
+    payouts: { dayOfWeek: 5 },
   },
   media: { backend: 'database', objectStorage: false, private: false, directUpload: false },
 };

@@ -12,6 +12,7 @@ import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from 'r
 import type { PageProps } from '../shell/pageProps';
 import type { Post } from '../types/social';
 import { SocialError, createPost, formatKes, netOf, uploadMedia } from '../lib/social';
+import { accessLabel } from '../lib/duration';
 import { Link, navigate } from '../lib/router';
 import { AlertIcon, CheckIcon, LockIcon, SpinnerIcon } from '../components/icons';
 import HeroBanner from '../components/HeroBanner';
@@ -19,6 +20,17 @@ import HeroBanner from '../components/HeroBanner';
 type Kind = Post['type'];
 const MAX_CAPTION = 2000;
 const MAX_MEDIA_BYTES = 32 * 1024 * 1024;
+
+/** Access windows up to 24 h — the creator sets them; nobody's paid forever. */
+const DURATIONS: { value: number; label: string }[] = [
+  { value: 15, label: '15 minutes' },
+  { value: 30, label: '30 minutes' },
+  { value: 60, label: '1 hour' },
+  { value: 180, label: '3 hours' },
+  { value: 360, label: '6 hours' },
+  { value: 720, label: '12 hours' },
+  { value: 1440, label: '24 hours' },
+];
 
 const KINDS: { key: Kind; label: string }[] = [
   { key: 'image', label: 'Image' },
@@ -38,6 +50,9 @@ export default function CreatePostPage({
   const [caption, setCaption] = useState('');
   const [linkUrl, setLinkUrl] = useState('');
   const [priceRaw, setPriceRaw] = useState('0');
+  const [accessMinutes, setAccessMinutes] = useState<number>(60);
+  const [preset, setPreset] = useState<string>('60');
+  const [customAccess, setCustomAccess] = useState('');
   const [isAdult, setIsAdult] = useState(false);
   const [file, setFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<string | null>(null);
@@ -99,6 +114,9 @@ export default function CreatePostPage({
         commerce.maxPrice,
       )} — or 0 to publish it free.`;
     }
+    if (price > 0 && (!Number.isFinite(accessMinutes) || accessMinutes < 1 || accessMinutes > 1440)) {
+      return 'Access must be between 1 and 1440 minutes (1 hour to 24 hours).';
+    }
     if (isAdult && !commerce.adult) return 'Adult posts are not allowed on this platform.';
     if (isAdult && !adultOk) return 'Confirm you are 18 or over before posting adult content.';
     return null;
@@ -129,6 +147,7 @@ export default function CreatePostPage({
         type,
         ...(mediaKey ? { mediaKey } : {}),
         ...(type === 'link' ? { linkUrl: linkUrl.trim() } : {}),
+        ...(price > 0 ? { accessMinutes } : {}),
       });
       setStage('done');
       // A beat of "Published" so the button press does not feel swallowed.
@@ -356,6 +375,57 @@ export default function CreatePostPage({
           </p>
         </div>
       </div>
+
+      {/* ── Access window (paid content) ───────────────────────────────── */}
+      {price > 0 && (
+        <div>
+          <label className="label" htmlFor="access-minutes">
+            Access window
+          </label>
+          <select
+            id="access-minutes"
+            className="field"
+            disabled={busy}
+            value={preset}
+            onChange={(event) => {
+              setPreset(event.target.value);
+              setFieldError(null);
+              if (event.target.value !== 'custom') {
+                setAccessMinutes(Number(event.target.value) || 60);
+                setCustomAccess('');
+              }
+            }}
+          >
+            {DURATIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+            <option value="custom">Custom…</option>
+          </select>
+          {preset === 'custom' && (
+            <input
+              className="field mt-2"
+              type="number"
+              min={1}
+              max={1440}
+              inputMode="numeric"
+              placeholder="Minutes, 1–1440 (e.g. 90)"
+              aria-label="Custom access, in minutes"
+              value={customAccess}
+              onChange={(event) => {
+                setCustomAccess(event.target.value);
+                setFieldError(null);
+                setAccessMinutes(Math.trunc(Number(event.target.value) || 60));
+              }}
+            />
+          )}
+          <p className="mt-1.5 text-xs leading-relaxed text-muted">
+            Buyers keep access only for this window — no forever purchases.{' '}
+            <span className="font-semibold text-ink">Selected: {accessLabel(accessMinutes)}.</span>
+          </p>
+        </div>
+      )}
 
       {/* ── 18+ ─────────────────────────────────────────────────────────── */}
       {commerce.adult ? (

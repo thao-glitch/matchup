@@ -24,6 +24,7 @@ import {
   timeAgo,
 } from '../lib/social';
 import { Link, navigate } from '../lib/router';
+import { accessLabel } from '../lib/duration';
 import { mediaSrc } from '../lib/mediaUrl';
 import MediaImg from '../components/MediaImg';
 import Avatar from '../components/Avatar';
@@ -367,8 +368,8 @@ export default function PostDetailPage({
               <LockIcon className="h-7 w-7 text-ink" />
               <p className="text-base font-semibold text-ink">This post is locked</p>
               <p className="max-w-xs text-sm leading-relaxed text-muted">
-                Unlock it for {formatKes(post.price)} — paid once with M-PESA, kept by the creator
-                minus the platform fee.
+                Unlock it for {formatKes(post.price)} — your access window is{' '}
+                {accessLabel(post.accessMinutes).replace(/ access$/, '')}.
               </p>
               <button type="button" className="btn btn-primary" onClick={() => setPayOpen(true)}>
                 Unlock for {formatKes(post.price)}

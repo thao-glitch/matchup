@@ -548,7 +548,7 @@ function PayoutRequests({ onMutated }: { onMutated: () => void }) {
   const total = data?.total ?? 0;
 
   return (
-    <Panel title="Payout requests" hint="Withdrawals reserved from creator wallets — approve after the M-PESA send lands, reject to refund.">
+    <Panel title="Payout requests" hint="Weekly payouts — send each creator from the platform wallet after the M-PESA deliver lands, then approve here; reject to refund the reservation. The payout day is configurable in Settings → Creator payouts.">
       <ErrorBanner message={error} onDismiss={() => setError(null)} />
 
       {loading ? (

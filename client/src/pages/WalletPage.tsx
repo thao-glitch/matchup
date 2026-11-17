@@ -26,6 +26,8 @@ import { Link } from '../lib/router';
 import { PlusIcon, SpinnerIcon, WalletIcon } from '../components/icons';
 
 /** Daraja moves whole shillings and the server enforces the same floor. */
+/** 0 = Sunday … 6 = Saturday — shown to creators so they know when to expect money. */
+const WEEKDAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 const MIN_PAYOUT = 100;
 
 const KIND_META: Record<WalletEntry['kind'], { label: string; className: string }> = {
@@ -88,6 +90,7 @@ export default function WalletPage({ account, config, requireAuth }: PageProps) 
   }, [account, nonce]);
 
   const commissionRate = config.commerce.commissionRate;
+  const payoutDay = WEEKDAY_NAMES[config.commerce.payouts?.dayOfWeek ?? 5] ?? 'Friday';
   const balance = wallet?.balance ?? 0;
 
   async function submit(event: FormEvent): Promise<void> {
@@ -226,7 +229,8 @@ export default function WalletPage({ account, config, requireAuth }: PageProps) 
       <section className="card p-5">
         <h2 className="text-base font-semibold text-ink">Withdraw to M-PESA</h2>
         <p className="mt-1 text-xs leading-relaxed text-muted">
-          The owner confirms every payout from the dashboard — it is not automatic.
+          Payouts are sent once a week, every {payoutDay}. The owner confirms every request from
+          the dashboard — request it any time and it is paid on the next payout day.
         </p>
 
         {requested && (
@@ -234,7 +238,7 @@ export default function WalletPage({ account, config, requireAuth }: PageProps) 
             className="mt-4 flex items-start gap-2 rounded-xl border border-ok/30 bg-ok/10 px-3 py-2.5 text-xs leading-relaxed text-ok"
             role="status"
           >
-            Payout requested — the owner will confirm it.
+            Payout requested — the owner will send it on {payoutDay}.
           </p>
         )}
         {formError && (

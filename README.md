@@ -468,9 +468,15 @@ takes the platform cut, credits the creator's wallet and unlocks whatever was
 bought — exactly like an STK sale. Full guide, including what to ask
 Safaricom for and the manual steps: [docs/PAYMENTS.md](docs/PAYMENTS.md).
 
-Payouts work the same either way: a creator requests in `/wallet`, you send
-the money by M-PESA, and approve it in `Earnings → Payout requests` (or
-reject to refund it).
+Payouts are weekly: every creator is paid out once a week, on the day you set
+in `Settings → Creator payouts` (default Friday). A creator requests in
+`/wallet` any time, it lands in `Earnings → Payout requests`, and you send the
+money by M-PESA (Pochi) once a week and approve each request.
+
+Paid content access is timed, never permanent: creators choose the window
+(15 minutes to 24 hours) when they publish, and a purchase grants exactly
+that window — buy again to extend it. Nothing is "forever" unless it predates
+the feature.
 
 Matchmaking enforces all of it: a banned account cannot log in *or* queue
 (username and IP), a `features.maintenance` flip pauses the queue instantly,

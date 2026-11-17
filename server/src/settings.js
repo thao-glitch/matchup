@@ -71,6 +71,8 @@ const DEFAULTS = {
     manualEnabled: false,
     manualDestination: '',
     manualInstructions: '',
+    /** Creators are paid out once a week on this local day (0 = Sunday, 6 = Saturday). */
+    payoutDayOfWeek: 5,
   },
   /**
    * M-PESA Daraja (STK push) — secrets stay in this document, never public.
@@ -184,6 +186,7 @@ function sanitizeCommerce(raw, current) {
     manualEnabled: cleanBool(src.manualEnabled, base.manualEnabled),
     manualDestination: cleanText(src.manualDestination ?? base.manualDestination, 80),
     manualInstructions: cleanText(src.manualInstructions ?? base.manualInstructions, MAX_TEXT),
+    payoutDayOfWeek: cleanInt(src.payoutDayOfWeek ?? base.payoutDayOfWeek, 0, 6, DEFAULTS.commerce.payoutDayOfWeek),
   };
 }
 
@@ -361,6 +364,8 @@ function publicConfig() {
         destination: String(commerce.manualDestination || '').trim(),
         instructions: String(commerce.manualInstructions || '').trim(),
       },
+      /** Weekly payout day — creators are paid out once a week on this day. */
+      payouts: { dayOfWeek: Number(commerce.payoutDayOfWeek) || 5 },
     },
   };
 }

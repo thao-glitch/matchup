@@ -69,7 +69,8 @@ prove it end to end.
 commerce: {
   enabled, social, groups, adult, commissionRate, minPrice, maxPrice, currency,
   mpesaReady: false,   // credentials + shortcode + passkey all present
-  manualPayments: { enabled: false, destination: '', instructions: '' }  // manual review mode
+  manualPayments: { enabled: false, destination: '', instructions: '' }, // manual review mode
+  payouts: { dayOfWeek: 5 },       // 0 = Sunday … 6 = Saturday — creators are paid once a week
 }
 ```
 ```
@@ -84,7 +85,10 @@ ignored (the stored value wins), so a masked value round-trips safely.
 ```sql
 posts(id, account_id, username, type, caption, media_key, link_url,
       price DECIMAL(10,2), currency, is_adult, status, views, likes_n, comments_n,
-      purchases, created_at)                       -- no FK: content rows outlive accounts
+      purchases, access_minutes INT UNSIGNED, created_at)
+                                                       -- access_minutes: timed-access window in minutes (≤1440)
+post_access(account_id, post_id, charge_id, expires_at, created_at,
+            PRIMARY KEY(account_id, post_id))        -- timed entitlement rows
 post_likes(post_id, account_id, created_at, PRIMARY KEY(post_id, account_id))
 post_comments(id, post_id, account_id, username, body, status, created_at)
 charges(id, purpose, ref_id, buyer_account_id, buyer_username, payee_account_id,
@@ -159,6 +163,8 @@ interface Post {
   id: number; creatorId: number; creatorName: string; creatorCountry: string;
   type: 'image' | 'video' | 'link' | 'text';
   caption: string;
+  /** Timed access window in minutes (1–1440). New paid posts always carry one. */
+  accessMinutes?: number | null;
   mediaUrl: string | null;   // `/api/posts/<id>/media` (+ `?t=` when paid) when the viewer may see it, else null
   linkUrl: string | null;
   price: number; currency: string;
@@ -199,9 +205,10 @@ by an account.
 In **manual review mode** (`commerce.manualEnabled`) no STK push is fired at
 all: `POST /api/charges` opens a pending charge the owner settles from the
 dashboard once the buyer's SMS lands — approval calls the same `settle()` the
-callback would (commission split, creator wallet, entitlement, premium).
-`expireStaleCharges()` deliberately skips manual charges (they carry no
-`checkout_request_id`).
+callback would (commission split, creator wallet, timed entitlement, premium).
+Every paid post records a timed `post_access` row (1–1440 minutes, the
+creator's choice at publish). `expireStaleCharges()` deliberately
+skips manual charges (they carry no `checkout_request_id`).
 
 | Method | Path | Body | → |
 | --- | --- | --- | --- |
