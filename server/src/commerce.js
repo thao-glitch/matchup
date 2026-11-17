@@ -872,9 +872,17 @@ async function createCharge(user, { purpose, refId, phone } = {}) {
     throw new AuthError('price', 'That item is free — nothing to pay for.', 400);
   }
 
+  const manual = Boolean(settings.get().commerce.manualEnabled);
   // Reuse an open charge: a double-tap on Pay must not start two STK pushes.
-  const open = await socialStore.findOpenCharge({ purpose, refId: Number(refId), buyerId: user.id });
-  requireStk();
+  // Manual review lasts longer than an STK prompt — a charge stays reusable
+  // for half an hour so a slow buyer does not open a second row.
+  const open = await socialStore.findOpenCharge({
+    purpose,
+    refId: Number(refId),
+    buyerId: user.id,
+    windowMinutes: manual ? 30 : 5,
+  });
+  if (!manual) requireStk();
 
   let charge = open;
   if (!charge) {
@@ -895,6 +903,13 @@ async function createCharge(user, { purpose, refId, phone } = {}) {
       premiumDays: target.premiumDays ?? null,
       periodDays: target.periodDays ?? null,
     });
+  }
+
+  // Manual payment review: the charge stays pending with no STK push. The
+  // owner confirms the incoming M-PESA in /admin → Earnings; `settle()`
+  // applies the same split and entitlement the STK callback would.
+  if (manual) {
+    return { charge: await socialStore.getCharge(charge.id) };
   }
 
   try {
@@ -956,8 +971,13 @@ async function chargeStatus(user, id) {
         }
       }
     }
-    // Sweep anything past the STK lifetime so "pending" cannot linger forever.
-    if (ageExpired(charge)) {
+    // Sweep anything past its expected lifetime so "pending" cannot linger
+    // forever. STK prompts die after 5 minutes; manual review gets half an
+    // hour (the same window the open-charge reuse uses).
+    const stale = settings.get().commerce.manualEnabled
+      ? ageExpired(charge, 30 * 60_000)
+      : ageExpired(charge);
+    if (stale) {
       await socialStore.markChargeFailed(charge.id, { resultDesc: 'Request timed out', note: 'expired' });
       return { charge: await socialStore.getCharge(charge.id) };
     }
@@ -967,7 +987,8 @@ async function chargeStatus(user, id) {
 }
 
 /** An STK request dies after 5 minutes — Daraja stops honouring it by then. */
-const ageExpired = (charge) => Date.now() - Date.parse(charge.createdAt) > 5 * 60_000;
+const ageExpired = (charge, windowMs = 5 * 60_000) =>
+  Date.now() - Date.parse(charge.createdAt) > windowMs;
 
 /**
  * The settlement: paid row → whatever the charge bought, exactly once.
@@ -980,7 +1001,7 @@ const ageExpired = (charge) => Date.now() - Date.parse(charge.createdAt) > 5 * 6
  *
  * @returns {Promise<boolean>} true when this call moved the money
  */
-async function settle(chargeId, { receipt = null, resultCode = 0, description = null } = {}) {
+async function settle(chargeId, { receipt = null, resultCode = 0, description = null, note = null } = {}) {
   const charge = await socialStore.getCharge(chargeId);
   if (!charge) return false;
 
@@ -988,6 +1009,7 @@ async function settle(chargeId, { receipt = null, resultCode = 0, description = 
     receipt,
     resultCode,
     resultDesc: description,
+    note,
   });
   if (!won) return false;
 

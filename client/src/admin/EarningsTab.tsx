@@ -313,9 +313,11 @@ function ChargesLedger({ onMutated }: { onMutated: () => void }) {
       title="Payments ledger"
       hint={
         <>
-          Every payment on the platform — post purchases, room entry and premium. The Daraja
-          callback settles these automatically; the button below is only for a callback that never
-          arrived.
+          Every payment on the platform — post purchases, room entry and premium. With STK mode the
+          Daraja callback settles these automatically (the button below is only for a callback
+          that never arrived); in Manual review mode every pending charge waits for your manual
+          approval — the buyer's phone number, amount and purpose are shown so you can match the
+          SMS.
         </>
       }
     >

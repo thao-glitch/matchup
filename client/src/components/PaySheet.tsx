@@ -60,6 +60,9 @@ export default function PaySheet({
     };
   }, []);
 
+  const manual = Boolean(config.commerce.manualPayments?.enabled);
+  const destination = config.commerce.manualPayments?.destination ?? '';
+  const manualInstructions = config.commerce.manualPayments?.instructions ?? '';
   const amount = Math.round(target.amount);
   /** Double-tapping Pay must not open two STK pushes. */
   const busy = phase === 'sending' || phase === 'waiting';
@@ -120,6 +123,10 @@ export default function PaySheet({
   async function watch(id: number) {
     try {
       const settled = await waitForPayment(id, {
+        // Manual confirmation can take minutes (the owner sees the SMS and
+        // approves in the dashboard) — the default 3-minute window would
+        // time out every manual payment, so manual mode waits much longer.
+        timeoutMs: manual ? 30 * 60 * 1000 : undefined,
         onTick: (next) => {
           if (alive.current) setCharge(next);
         },
@@ -191,7 +198,7 @@ export default function PaySheet({
         {phase === 'form' && (
           <>
             <label className="label mt-4" htmlFor="pay-phone">
-              M-PESA number
+              {manual ? 'The M-PESA number you will pay from' : 'M-PESA number'}
             </label>
             <input
               id="pay-phone"
@@ -203,9 +210,11 @@ export default function PaySheet({
               onChange={(event) => setPhone(event.target.value)}
             />
             <p className="mt-2 text-xs leading-relaxed text-muted">
-              {config.commerce.mpesaReady
-                ? 'Press Pay and your phone will prompt you — enter your M-PESA PIN to confirm.'
-                : 'M-PESA is not accepting payments right now — the owner is still finishing the setup.'}
+              {manual
+                ? 'Send the exact amount from this number. The owner matches your SMS against the request and sets the charge — no prompt will appear on your phone.'
+                : config.commerce.mpesaReady
+                  ? 'Press Pay and your phone will prompt you — enter your M-PESA PIN to confirm.'
+                  : 'M-PESA is not accepting payments right now — the owner is still finishing the setup.'}
             </p>
             {!account && (
               <p className="mt-3 rounded-xl border border-warn/30 bg-warn/10 px-3 py-2 text-xs text-warn">
@@ -216,9 +225,13 @@ export default function PaySheet({
               type="button"
               className="btn btn-primary mt-4 w-full"
               onClick={() => void start()}
-              disabled={!account || !config.commerce.mpesaReady}
+              disabled={!account || (!manual && !config.commerce.mpesaReady)}
             >
-              {account ? `Pay ${formatKes(amount)}` : 'Sign in to pay'}
+              {!account
+                ? 'Sign in to pay'
+                : manual
+                  ? `Reserve ${formatKes(amount)} — I'll send it`
+                  : `Pay ${formatKes(amount)}`}
             </button>
             {!account && onRequireAuth && (
               <button type="button" className="btn btn-ghost mt-2 w-full" onClick={onRequireAuth}>
@@ -237,7 +250,40 @@ export default function PaySheet({
         )}
 
         {/* ── Waiting for the PIN ───────────────────────────────────────── */}
-        {phase === 'waiting' && (
+        {phase === 'waiting' && manual && (
+          <div className="mt-5 rounded-xl border border-accent/30 bg-accent/10 px-4 py-4">
+            <p className="text-sm font-semibold text-ink">Send the money now</p>
+            <dl className="mt-2 space-y-1.5 text-xs text-ink">
+              <div className="flex justify-between gap-3">
+                <dt className="text-muted">Amount</dt>
+                <dd className="font-semibold tabular-nums">{formatKes(amount)}</dd>
+              </div>
+              <div className="flex justify-between gap-3">
+                <dt className="text-muted">Send to</dt>
+                <dd className="break-all text-right font-medium">{destination || 'the number the owner gave you'}</dd>
+              </div>
+              <div className="flex justify-between gap-3">
+                <dt className="text-muted">From</dt>
+                <dd className="font-medium tabular-nums">{charge?.phone || phone}</dd>
+              </div>
+              <div className="flex justify-between gap-3">
+                <dt className="text-muted">Reference</dt>
+                <dd className="font-mono font-medium">MU{charge?.id}</dd>
+              </div>
+            </dl>
+            {manualInstructions && (
+              <p className="mt-2 rounded-lg bg-black/20 px-2.5 py-2 text-[11px] leading-relaxed text-muted">
+                {manualInstructions}
+              </p>
+            )}
+            <p className="mt-2 flex items-center gap-2 text-[11px] text-muted">
+              <span className="h-3 w-3 animate-spin rounded-full border-2 border-accent border-t-transparent" />
+              Waiting for the owner to confirm — usually a few minutes. This screen
+              unlocks the moment they approve it.
+            </p>
+          </div>
+        )}
+        {phase === 'waiting' && !manual && (
           <div className="mt-5 rounded-xl border border-accent/30 bg-accent/10 px-4 py-4">
             <div className="flex items-center gap-3">
               <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-accent border-t-transparent" />

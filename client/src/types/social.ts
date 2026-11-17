@@ -148,6 +148,18 @@ export interface CommerceConfig {
    * whether a Pay button can promise a prompt at all.
    */
   mpesaReady: boolean;
+  /**
+   * Manual payment review — for a platform whose M-PESA is not on Daraja.
+   * Buyers send the money the long way; the owner confirms the SMS in the
+   * dashboard. Every charge settles exactly as an STK charge would.
+   */
+  manualPayments?: {
+    enabled: boolean;
+    /** Where buyers are told to send the money (e.g. a Pochi number). */
+    destination: string;
+    /** Free-text line shown verbatim on the pay screens. */
+    instructions: string;
+  };
 }
 
 /** Payment inputs shared by the pay sheet for posts, rooms and subscriptions. */

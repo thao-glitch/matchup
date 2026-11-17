@@ -349,6 +349,12 @@ export interface CommerceSettings {
   minPrice: number;
   maxPrice: number;
   currency: string;
+  /** Manual review mode — every charge waits for the owner's SMS approval. */
+  manualEnabled: boolean;
+  /** Where buyers are told to send the money (e.g. a Pochi number). */
+  manualDestination: string;
+  /** Free-text shown verbatim on the pay screen. */
+  manualInstructions: string;
 }
 
 /** Secrets arrive masked as `••••••••`; writing a masked value back keeps

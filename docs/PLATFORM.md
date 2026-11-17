@@ -55,18 +55,21 @@ Settings docs (all edited through `PUT /api/admin/settings`):
 }
 ```
 
-Without a `shortcode` and `passkey` no charge can be opened at all —
-`createCharge` refuses with `mpesa-not-configured` before writing a row,
-because a prompt that could never be sent must not leave a pending charge
-behind. `/admin` → Settings → **Test connection** reports which requirement
-is outstanding and can fire a real KES 1 prompt to prove it end to end.
+With STK mode on, a missing `shortcode` or `passkey` refuses the charge with
+`mpesa-not-configured` before a row is written — a prompt that could never be
+sent must not leave a pending charge behind. (In **manual mode** no STK push
+is attempted at all; see §1.1 — a pending charge is exactly what the owner
+settles by hand from the dashboard.) `/admin` → Settings → **Test connection**
+reports which requirement is outstanding and can fire a real KES 1 prompt to
+prove it end to end.
 
 `GET /api/config` additionally returns a **public** `commerce` block:
 
 ```jsonc
 commerce: {
   enabled, social, groups, adult, commissionRate, minPrice, maxPrice, currency,
-  mpesaReady: false   // credentials + shortcode + passkey all present
+  mpesaReady: false,   // credentials + shortcode + passkey all present
+  manualPayments: { enabled: false, destination: '', instructions: '' }  // manual review mode
 }
 ```
 ```
@@ -192,6 +195,14 @@ by an account.
 | DELETE | `/api/creators/:id/subscribe` | | `{ subscription }` — stop renewing, access until expiry |
 
 ### Charges (the STK push)
+
+In **manual review mode** (`commerce.manualEnabled`) no STK push is fired at
+all: `POST /api/charges` opens a pending charge the owner settles from the
+dashboard once the buyer's SMS lands — approval calls the same `settle()` the
+callback would (commission split, creator wallet, entitlement, premium).
+`expireStaleCharges()` deliberately skips manual charges (they carry no
+`checkout_request_id`).
+
 | Method | Path | Body | → |
 | --- | --- | --- | --- |
 | POST | `/api/charges` | `{ purpose: 'post'\|'room'\|'sub', refId, phone }` | 201 `{ charge }` |

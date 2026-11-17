@@ -73,6 +73,9 @@ export default function PaymentPanel({ account, config, onPremiumChange }: Props
   }, []);
 
   const { payment, commerce } = config;
+  const manual = Boolean(commerce.manualPayments?.enabled);
+  const destination = commerce.manualPayments?.destination ?? '';
+  const manualInstructions = commerce.manualPayments?.instructions ?? '';
   const active = premiumActive(premiumUntil);
   /** Double-tapping Pay must not open two STK prompts. */
   const busy = phase === 'sending' || phase === 'waiting';
@@ -117,6 +120,9 @@ export default function PaymentPanel({ account, config, onPremiumChange }: Props
   async function watch(id: number) {
     try {
       const settled = await waitForPayment(id, {
+        // Manual review can take minutes — do not time out a payment the
+        // owner has only just seen on their SMS.
+        timeoutMs: manual ? 30 * 60 * 1000 : undefined,
         onTick: (next) => {
           if (alive.current) setCharge(next);
         },
@@ -176,7 +182,7 @@ export default function PaymentPanel({ account, config, onPremiumChange }: Props
     </span>
   ) : charge?.status === 'pending' ? (
     <span className="inline-flex items-center gap-1 rounded-full bg-warn/15 px-2.5 py-1 text-xs font-semibold text-warn">
-      ◔ Waiting for your PIN
+      {manual ? '◔ Waiting for confirmation' : '◔ Waiting for your PIN'}
     </span>
   ) : null;
 
@@ -218,7 +224,7 @@ export default function PaymentPanel({ account, config, onPremiumChange }: Props
                 <>
                   <div>
                     <label className="label" htmlFor="premium-phone">
-                      M-PESA number
+                      {manual ? 'The M-PESA number you will pay from' : 'M-PESA number'}
                     </label>
                     <input
                       id="premium-phone"
@@ -231,15 +237,16 @@ export default function PaymentPanel({ account, config, onPremiumChange }: Props
                     />
                   </div>
 
-                  {!commerce.mpesaReady ? (
+                  {!commerce.mpesaReady && !manual ? (
                     <p className="rounded-xl border border-warn/30 bg-warn/10 px-3 py-2 text-xs leading-relaxed text-warn">
                       M-PESA is not accepting payments yet — the owner is still finishing the
                       Daraja setup.
                     </p>
                   ) : (
                     <p className="text-xs leading-relaxed text-muted">
-                      Press pay and your phone prompts you for the M-PESA PIN. Premium switches on
-                      the moment you confirm.
+                      {manual
+                        ? 'Send the exact amount from this number. The owner matches your SMS and confirms the charge manually — no prompt will appear on your phone.'
+                        : 'Press pay and your phone prompts you for the M-PESA PIN. Premium switches on the moment you confirm.'}
                     </p>
                   )}
 
@@ -251,9 +258,9 @@ export default function PaymentPanel({ account, config, onPremiumChange }: Props
                     type="button"
                     className="btn btn-primary w-full"
                     onClick={() => void pay()}
-                    disabled={!commerce.mpesaReady}
+                    disabled={!commerce.mpesaReady && !manual}
                   >
-                    Pay {formatKes(payment.amount)}
+                    {manual ? `I'll send ${formatKes(payment.amount)} — get instructions` : `Pay ${formatKes(payment.amount)}`}
                   </button>
                 </>
               )}
@@ -261,12 +268,49 @@ export default function PaymentPanel({ account, config, onPremiumChange }: Props
               {phase === 'sending' && (
                 <div className="flex items-center gap-3 rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-muted">
                   <SpinnerIcon className="h-4 w-4" />
-                  Sending the request to M-PESA…
+                  {manual ? 'Opening your payment request…' : 'Sending the request to M-PESA…'}
                 </div>
               )}
 
-              {/* ── Waiting for the PIN ───────────────────────────────────── */}
-              {phase === 'waiting' && (
+              {/* ── Waiting for the PIN (or the owner's OK) ───────────────── */}
+              {phase === 'waiting' && manual && (
+                <div className="rounded-xl border border-accent/30 bg-accent/10 px-4 py-4">
+                  <p className="text-sm font-semibold text-ink">Send the money now</p>
+                  <dl className="mt-2 space-y-1.5 text-xs text-ink">
+                    <div className="flex justify-between gap-3">
+                      <dt className="text-muted">Amount</dt>
+                      <dd className="font-semibold tabular-nums">
+                        {formatKes(charge?.amount ?? payment.amount)}
+                      </dd>
+                    </div>
+                    <div className="flex justify-between gap-3">
+                      <dt className="text-muted">Send to</dt>
+                      <dd className="break-all text-right font-medium">
+                        {destination || 'the number the owner gave you'}
+                      </dd>
+                    </div>
+                    <div className="flex justify-between gap-3">
+                      <dt className="text-muted">From</dt>
+                      <dd className="font-medium tabular-nums">{charge?.phone || phone}</dd>
+                    </div>
+                    <div className="flex justify-between gap-3">
+                      <dt className="text-muted">Reference</dt>
+                      <dd className="font-mono font-medium">MU{charge?.id}</dd>
+                    </div>
+                  </dl>
+                  {manualInstructions && (
+                    <p className="mt-2 rounded-lg bg-black/20 px-2.5 py-2 text-[11px] leading-relaxed text-muted">
+                      {manualInstructions}
+                    </p>
+                  )}
+                  <p className="mt-2 flex items-center gap-2 text-[11px] text-muted">
+                    <SpinnerIcon className="h-3 w-3" />
+                    Waiting for the owner to confirm — usually a few minutes. Premium activates the
+                    moment they approve it.
+                  </p>
+                </div>
+              )}
+              {phase === 'waiting' && !manual && (
                 <div className="rounded-xl border border-accent/30 bg-accent/10 px-4 py-4">
                   <div className="flex items-center gap-3">
                     <SpinnerIcon className="h-3.5 w-3.5" />

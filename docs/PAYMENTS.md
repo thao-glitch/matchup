@@ -60,7 +60,40 @@ number on Safaricom's side — either way the cash ends on your personal line.
 
 ---
 
-## 2. How the app is wired
+## 2. Manual review mode — for when there is no Daraja at all
+
+Some owners don't have a Paybill or Till (and the Pochi la Biashara they do
+have is not supported by STK push — it is a manual product only). Until you
+do, the app runs a **manual payment review** instead of firing a PIN prompt:
+
+1. Turn on **`/admin` → Settings → Manual payments → Manual payment review**.
+   Set the **destination** (e.g. your Pochi number) and the short instructions
+   shown to every buyer. Off → the app is exactly as described above.
+2. A buyer presses Pay: no PIN prompt appears on their phone. Instead the
+   screen shows them the amount, the exact number to send it to, their own
+   phone number and a reference. They send the money any way M-PESA allows
+   (Pochi, pay-someone, Airtel Money — whatever reaches the destination).
+3. The purchase appears in **`/admin` → Earnings → Charges** as **pending**,
+   with the buyer's phone number, the amount, and the purpose (`post` /
+   `room` / `sub` / `premium`) — enough to match the SMS.
+4. **You approve it** (or reject it). Approval calls the same `settle()` the
+   STK callback would — the platform cut is taken, the creator's wallet is
+   credited with the net, and the buyer gets whatever they bought (post
+   unlocked / room entered / subscription activated / premium). Rejecting
+   marks it failed and the buyer gets nothing. All of it is audited in
+   `/admin` → Audit.
+5. **Payouts behave the same as before**: a creator requests a withdrawal in
+   `/wallet`, it lands in **Earnings → Payout requests** as pending; you send
+   the money by M-PESA (Pochi: *Move money → Send money*) and approve the
+   request (or reject to refund it to their in-app wallet).
+
+Honest limits: **nothing is automatic** — every payment and every payout
+needs your eye and a tap. It does not scale past a handful of transactions a
+day, it relies on you matching SMS by phone + amount, and buyers cannot have
+a guaranteed-instant purchase. The moment you have Daraja credentials, turn
+the toggle off and switch to STK push — no data migration, no redeploy.
+
+## 3. How the app is wired
 
 One table, `charges`, holds every payment on the platform — premium, post
 purchases and room entry alike:
@@ -89,7 +122,7 @@ already prompted for.
 
 ---
 
-## 3. Configuring the app
+## 4. Configuring the app
 
 Everything below is edited in **`/admin` → Settings** and takes effect
 immediately for every visitor. No redeploy, no code change.
@@ -115,7 +148,7 @@ back to polling, which works but is slower.
 
 ---
 
-## 4. Testing before you announce it
+## 5. Testing before you announce it
 
 `/admin` → Settings → **M-PESA** has a **Test connection** button. It reports
 one line per requirement — credentials, shortcode, passkey, callback,
@@ -140,7 +173,7 @@ Then run the full loop:
 
 ---
 
-## 5. Fees, taxes and compliance
+## 6. Fees, taxes and compliance
 
 - **Transaction fees** apply per collection; check the current tariff with
   Safaricom, they revise it.
@@ -152,7 +185,7 @@ Then run the full loop:
 
 ---
 
-## 6. If something goes wrong
+## 7. If something goes wrong
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |

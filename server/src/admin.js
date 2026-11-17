@@ -490,7 +490,7 @@ async function reviewCharge(admin, id, patch = {}) {
   if (patch.status === 'paid') {
     const settled = await commerce.settle(id, {
       receipt: patch.mpesaRef ?? before.mpesaRef,
-      description: patch.note ?? 'Approved by owner',
+      note: patch.note ?? 'Approved by owner',
     });
     audit(admin, 'charge.approve', `#${id} ${before.buyerUsername} → ${before.payeeUsername}`, {
       amount: before.amount,

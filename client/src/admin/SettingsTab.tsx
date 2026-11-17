@@ -59,6 +59,9 @@ interface CommerceForm {
   minPrice: string;
   maxPrice: string;
   currency: string;
+  manualEnabled: boolean;
+  manualDestination: string;
+  manualInstructions: string;
 }
 
 interface MpesaForm {
@@ -449,6 +452,53 @@ export default function SettingsTab() {
         </div>
       </Panel>
 
+      {/* Manual review mode — for when there is no Daraja at all. Every
+          purchase opens a pending charge; the buyer sends the money by any
+          M-PESA route; the owner confirms the SMS in Earnings. Approval
+          settles the charge exactly as an STK callback would. */}
+      <Panel
+        title="Manual payments"
+        hint="No Daraja? Every pay button becomes a pending request you approve by hand after the SMS lands. The split, wallet credit and entitlement all work exactly as an STK payment."
+      >
+        <div className="mt-3">
+          <Toggle
+            checked={commerceForm.manualEnabled}
+            onChange={(next) => setCommerce('manualEnabled', next)}
+            label="Manual payment review"
+            hint="On, every purchase waits for your approval in Earnings → Charges instead of an STK prompt."
+          />
+        </div>
+
+        <div className="mt-4 space-y-3">
+          <Field
+            label="Where buyers send the money"
+            hint="Shown verbatim to every buyer on the pay screen — e.g. a Pochi la Biashara number, or the line the owner checks for SMS."
+          >
+            <input
+              className="field"
+              type="text"
+              value={commerceForm.manualDestination}
+              maxLength={80}
+              placeholder="e.g. 0712 345 678 (Pochi la Biashara)"
+              onChange={(event) => setCommerce('manualDestination', event.target.value)}
+            />
+          </Field>
+
+          <Field
+            label="Instructions shown to the buyer"
+            hint="Exact wording shown on the pay screen — keep it short. The amount and the buyer's phone number always come first."
+          >
+            <textarea
+              className="field min-h-[4.5rem]"
+              maxLength={600}
+              value={commerceForm.manualInstructions}
+              placeholder="Send the exact amount from the number you entered. We confirm it within a few minutes and unlock it instantly."
+              onChange={(event) => setCommerce('manualInstructions', event.target.value)}
+            />
+          </Field>
+        </div>
+      </Panel>
+
       <Panel
         title="M-PESA (Daraja)"
         hint="Every payment on the platform is an STK push: the buyer's phone prompts for the PIN and the callback settles the charge. Callback URL must be the public https://<host>/api/mpesa/callback. Secrets arrive masked and are kept when saved untouched."
@@ -712,6 +762,9 @@ function toCommerceForm(commerce: CommerceSettings): CommerceForm {
     minPrice: String(commerce.minPrice),
     maxPrice: String(commerce.maxPrice),
     currency: commerce.currency,
+    manualEnabled: commerce.manualEnabled,
+    manualDestination: commerce.manualDestination,
+    manualInstructions: commerce.manualInstructions,
   };
 }
 
@@ -748,6 +801,12 @@ function diffCommerce(form: CommerceForm, remote: CommerceSettings): Partial<Com
   if (!Number.isFinite(min) || min !== remote.minPrice) out.minPrice = Number.isFinite(min) ? min : remote.minPrice;
   const max = Math.round(Number(form.maxPrice));
   if (!Number.isFinite(max) || max !== remote.maxPrice) out.maxPrice = Number.isFinite(max) ? max : remote.maxPrice;
+
+  if (form.manualEnabled !== remote.manualEnabled) out.manualEnabled = form.manualEnabled;
+  const destination = form.manualDestination.trim();
+  if (destination !== remote.manualDestination) out.manualDestination = destination;
+  const instructions = form.manualInstructions.trim();
+  if (instructions !== remote.manualInstructions) out.manualInstructions = instructions;
   return out;
 }
 

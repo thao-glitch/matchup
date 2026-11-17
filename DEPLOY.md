@@ -130,23 +130,32 @@ ban & premium controls, and the audit trail of everything you did.
 > the login form. Set the two variables and restart the service to create one
 > (it only ever bootstraps while the admin table is empty).
 
-## 6. Payments (M-PESA STK push)
+## 6. Payments (M-PESA)
 
-The lobby ships with an M-PESA panel driven entirely by **`/admin` →
-Settings** (price, premium length, wording, and the Daraja credentials).
-Nothing is hard-coded and nothing needs a redeploy.
+Two modes, switched from **`/admin` → Settings** — nothing is hard-coded and
+nothing needs a redeploy.
 
-Every payment is an STK push: the buyer's phone prompts for the PIN and the
-callback settles it, so there is nothing for you to approve by hand. The
-money lands in your Paybill's collection account, which you settle to your
-own M-PESA number on Safaricom's side — no business bank account needed.
+**Default: STK push (Daraja).** The lobby ships with an M-PESA panel driven
+entirely by Settings (price, premium length, wording, and the Daraja
+credentials). The buyer's phone prompts for the PIN and the callback settles
+it — nothing for you to approve by hand. The money lands in your Paybill's
+collection account, which you settle to your own M-PESA number on
+Safaricom's side — no business bank account needed. The **Test connection**
+button in Settings reports exactly which credential is still missing, and can
+fire a real KES 1 prompt at a phone to prove the whole path works.
 
-The **Test connection** button in Settings reports exactly which credential
-is still missing, and can fire a real KES 1 prompt at a phone to prove the
-whole path works.
+**Manual review mode.** No Daraja? Toggle **Manual payments** on in Settings
+and set the destination buyers send to (e.g. a Pochi la Biashara number).
+Every pay button then opens a pending charge and shows the buyer where to
+send the money; you confirm the SMS in **Earnings → Charges** and approve it
+in one tap. Approval takes the platform cut, credits the creator's wallet,
+and unlocks whatever was bought — exactly as an STK sale would. Payouts work
+the same: creators request in `/wallet`, you send the money by M-PESA and
+approve in **Earnings → Payout requests**. Nothing is automatic, which is the
+honest trade-off — use it until you have Daraja credentials.
 
-Full walkthrough — including what to ask Safaricom for — in
-[docs/PAYMENTS.md](docs/PAYMENTS.md).
+Full walkthrough — including what to ask Safaricom for, and the Manual
+review steps in detail — in [docs/PAYMENTS.md](docs/PAYMENTS.md).
 
 ## 7. Move existing accounts over (optional, 3 min)
 

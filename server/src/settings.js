@@ -60,6 +60,17 @@ const DEFAULTS = {
     minPrice: 5,
     maxPrice: 15000,
     currency: 'KES',
+    /**
+     * Manual payment review — for owners whose M-PESA is not on Daraja yet
+     * (or never will be). Every purchase opens a pending charge WITHOUT an
+     * STK push; the buyer sends the money by any M-PESA route and the owner
+     * confirms the SMS in `/admin` → Earnings. Approval settles the charge
+     * exactly like an STK callback (split, wallet, entitlement), so the
+     * platform cut and every creator payout behave identically.
+     */
+    manualEnabled: false,
+    manualDestination: '',
+    manualInstructions: '',
   },
   /**
    * M-PESA Daraja (STK push) — secrets stay in this document, never public.
@@ -168,6 +179,11 @@ function sanitizeCommerce(raw, current) {
       cleanInt(src.maxPrice ?? base.maxPrice, 1, 1_000_000, DEFAULTS.commerce.maxPrice),
     ),
     currency: (cleanText(src.currency ?? base.currency, 3) || 'KES').toUpperCase(),
+    // Manual payment review — destination is shown to the buyer verbatim, so
+    // it is stored exactly as typed (trimmed, capped).
+    manualEnabled: cleanBool(src.manualEnabled, base.manualEnabled),
+    manualDestination: cleanText(src.manualDestination ?? base.manualDestination, 80),
+    manualInstructions: cleanText(src.manualInstructions ?? base.manualInstructions, MAX_TEXT),
   };
 }
 
@@ -335,6 +351,16 @@ function publicConfig() {
           mpesa.shortcode &&
           mpesa.passkey,
       ),
+      /**
+       * Manual review mode — the buyer needs to know where to send the
+       * money and why the charge is not a PIN prompt. `destination` is a
+       * public M-PESA address by design; the owner controls what it says.
+       */
+      manualPayments: {
+        enabled: Boolean(commerce.manualEnabled),
+        destination: String(commerce.manualDestination || '').trim(),
+        instructions: String(commerce.manualInstructions || '').trim(),
+      },
     },
   };
 }

@@ -508,12 +508,18 @@ async function getChargeByCheckout(checkoutRequestId) {
   return mapCharge(rows[0]);
 }
 
-/** The still-open charge for one buyer + one thing (idempotent creation). */
-async function findOpenCharge({ purpose, refId, buyerId }) {
+/**
+ * The still-open charge for one buyer + one thing (idempotent creation).
+ * `windowMinutes` bounds how old a pending row may be and still be reused —
+ * 5 min after an STK prompt, 30 min in manual review (there is no callback
+ * racing us; the owner may take that long to see the SMS).
+ */
+async function findOpenCharge({ purpose, refId, buyerId, windowMinutes = 5 } = {}) {
+  const window = Math.min(60, Math.max(1, Number(windowMinutes) || 5));
   const rows = await query(
     `SELECT * FROM charges
       WHERE purpose = ? AND ref_id = ? AND buyer_account_id = ? AND status = 'pending'
-        AND created_at > NOW() - INTERVAL 5 MINUTE
+        AND created_at > NOW() - INTERVAL ${window} MINUTE
       ORDER BY id DESC LIMIT 1`,
     [purpose, Number(refId), Number(buyerId)],
   );
@@ -581,14 +587,15 @@ async function entitledRefIds({ purpose, accountId, refIds }) {
  *
  * @returns {Promise<boolean>} true when THIS call performed the settlement
  */
-async function markChargePaid(id, { receipt = null, resultCode = 0, resultDesc = null } = {}) {
+async function markChargePaid(id, { receipt = null, resultCode = 0, resultDesc = null, note = null } = {}) {
   const res = await query(
     `UPDATE charges
         SET status = 'paid', mpesa_receipt = COALESCE(?, mpesa_receipt),
             result_code = ?, result_desc = COALESCE(?, result_desc),
+            note = COALESCE(?, note),
             paid_at = NOW()
       WHERE id = ? AND status = 'pending'`,
-    [receipt, Number(resultCode) || 0, resultDesc, Number(id)],
+    [receipt, Number(resultCode) || 0, resultDesc, note, Number(id)],
   );
   return Number(res.affectedRows) > 0;
 }

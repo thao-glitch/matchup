@@ -112,7 +112,7 @@ matchup/
 │       ├── matchmaking.js            # validation + symmetric match rule
 │       ├── matchmaker.js             # FIFO queue, rooms, signal relay, presence
 │       ├── accounts.js               # register/login/sessions (scrypt, bearer tokens)
-│       ├── payments.js               # premium — opens the charge, fires the STK push
+│       ├── payments.js               # premium — opens the charge, fires the STK push (or manual pending approval)
 │       ├── commerce.js               # posts, paywall, charges, commission split, wallets, rooms
 │       ├── socialStore.js            # social tables (posts, charges, wallets, rooms…)
 │       ├── mpesa.js                  # Daraja STK push + callback parsing
@@ -461,8 +461,16 @@ and premium (or the post, or the room) opens without anyone approving
 anything. A lost callback is covered by polling Daraja directly. Everything
 (price, premium length, wording, Daraja credentials) is edited in `/admin` →
 Settings and applies live, and **Test connection** there reports exactly which
-credential is still missing. Full guide, including what to ask Safaricom for:
-[docs/PAYMENTS.md](docs/PAYMENTS.md).
+credential is still missing. **No Daraja?** Settings also has a **Manual
+payments** mode: buyers see where to send the money (e.g. Pochi la Biashara)
+and every charge lands pending in `/admin` → Earnings; approving it there
+takes the platform cut, credits the creator's wallet and unlocks whatever was
+bought — exactly like an STK sale. Full guide, including what to ask
+Safaricom for and the manual steps: [docs/PAYMENTS.md](docs/PAYMENTS.md).
+
+Payouts work the same either way: a creator requests in `/wallet`, you send
+the money by M-PESA, and approve it in `Earnings → Payout requests` (or
+reject to refund it).
 
 Matchmaking enforces all of it: a banned account cannot log in *or* queue
 (username and IP), a `features.maintenance` flip pauses the queue instantly,
