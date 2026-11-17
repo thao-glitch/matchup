@@ -333,9 +333,11 @@ async function updateUser(admin, id, patch) {
   if (patch.banned === true) {
     await revokeSessions(user.id);
     accounts.invalidateBanCache(user.username);
+    await accounts.refreshBanIps();
     audit(admin, 'user.ban', `${user.username} (#${user.id})`, { ip: user.lastIp });
   } else if (patch.banned === false) {
     accounts.invalidateBanCache(user.username);
+    await accounts.refreshBanIps();
     audit(admin, 'user.unban', `${user.username} (#${user.id})`);
   }
   if (patch.premiumDays !== undefined) {
