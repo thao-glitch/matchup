@@ -77,19 +77,28 @@ do, the app runs a **manual payment review** instead of firing a PIN prompt:
    they publish, and a purchase grants exactly that window — nothing is ever
    "forever". The window renews by buying again, extended from the later of
    now or the existing expiry.
-3. The purchase appears in **`/admin` → Earnings → Charges** as **pending**,
-   with the buyer's phone number, the amount, and the purpose (`post` /
-   `room` / `sub` / `premium`) — enough to match the SMS.
-4. **You approve it** (or reject it). Approval calls the same `settle()` the
-   STK callback would — the platform cut is taken, the creator's wallet is
-   credited with the net, and the buyer gets whatever they bought (post
-   unlocked / room entered / subscription activated / premium). Rejecting
-   marks it failed and the buyer gets nothing. All of it is audited in
-   `/admin` → Audit.
-5. **Payouts behave the same as before**: a creator requests a withdrawal in
-   `/wallet`, it lands in **Earnings → Payout requests** as pending; you send
-   the money by M-PESA (Pochi: *Move money → Send money*) and approve the
-   request (or reject to refund it to their in-app wallet).
+3. The purchase appears in **`/admin` → Authenticate** as a **pending card** — the
+   buyer's phone number sits top and centre in mono type, along with the amount,
+   the purpose (`post` / `room` / `sub` / `premium`) and what they're buying, so
+   matching the SMS takes less than a glance. Rows tint amber after five minutes
+   and red after ten so nothing ever sits unread — and the tab polls live (every
+   2 s) so the row appears *while the SMS buzz happens*, without you refreshing.
+   You can leave this screen up as your always-on desk.
+4. **Approve it** (single tap — "Approve — unlock access") or reject it.
+   Approval calls the same `settle()` the STK callback would — the platform cut
+   is taken, the creator's wallet is credited with the net, and the buyer gets
+   whatever they bought (post unlocked / room entered / subscription activated /
+   premium), all instantly on their screen. Rejecting marks it failed and the
+   buyer gets nothing — Reject requires a confirmation step precisely because it
+   cannot be undone. Every decision is audited in `/admin` → Audit. The same
+   pending charges are also visible under `/admin` → Earnings → Charges, which
+   exists for cross-checking and corrections.
+5. **Payouts are weekly**: every creator is paid once a week, on the day set in
+   **Settings → Creator payouts** (default Friday). A creator requests a withdrawal
+   in `/wallet` at any time, it lands in **Earnings → Payout requests** as pending
+   (and on-screen for creators: "Payouts are sent once a week, every <day>"); on
+   payout day you send the money by M-PESA (Pochi: *Move money → Send money*)
+   and approve each request — or reject to refund it to their in-app wallet.
 
 Honest limits: **nothing is automatic** — every payment and every payout
 needs your eye and a tap. It does not scale past a handful of transactions a

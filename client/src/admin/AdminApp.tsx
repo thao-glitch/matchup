@@ -27,6 +27,7 @@ import {
 } from './api';
 import { ErrorBanner, Pill } from './ui';
 import OverviewTab from './OverviewTab';
+import AuthenticateTab from './AuthenticateTab';
 import UsersTab from './UsersTab';
 import ContentTab from './ContentTab';
 import EarningsTab from './EarningsTab';
@@ -34,10 +35,19 @@ import RoomsTab from './RoomsTab';
 import SettingsTab from './SettingsTab';
 import AuditTab from './AuditTab';
 
-type TabId = 'overview' | 'users' | 'content' | 'earnings' | 'rooms' | 'settings' | 'audit';
+type TabId =
+  | 'overview'
+  | 'authenticate'
+  | 'users'
+  | 'content'
+  | 'earnings'
+  | 'rooms'
+  | 'settings'
+  | 'audit';
 
 const TABS: { id: TabId; label: string }[] = [
   { id: 'overview', label: 'Overview' },
+  { id: 'authenticate', label: 'Authenticate' },
   { id: 'users', label: 'Users' },
   { id: 'content', label: 'Content' },
   { id: 'earnings', label: 'Earnings' },
@@ -148,6 +158,7 @@ export default function AdminApp() {
       </nav>
 
       {tab === 'overview' && <OverviewTab />}
+      {tab === 'authenticate' && <AuthenticateTab />}
       {tab === 'users' && <UsersTab />}
       {tab === 'content' && <ContentTab />}
       {tab === 'earnings' && <EarningsTab />}

@@ -447,10 +447,13 @@ Two features that live entirely behind the same process — no extra service:
 `client/src/admin/`): live users and queue, call telemetry, the payments
 ledger, feature switches (ads / sign-ups / payments / **maintenance**), ban &
 premium controls, a full per-account **Inspect** view (every post — paid and
-18+ included — comments, follows, subscriptions, charges, wallet, sessions
+18+ included — comments, likes, follows, subscriptions, charges, wallet, sessions
 and rooms, with the media itself streamed to the owner past the paywall and
-audited whenever it is paid or adult), room rosters and an audit trail of
-every action. Admins live in their own
+audited whenever it is paid or adult), an always-on **Authenticate** desk for
+manual payments (the buyer's phone number shown top-and-centre with amount and
+purpose; Approve unlocks instantly on the buyer's screen; the tab polls live
+and rows tint amber/red as they age), room rosters and an audit trail of every
+action. Admins live in their own
 `admins` table with their own scrypt hashes and 12-hour sessions — being a
 user of the app can never make you an admin of it.
 
